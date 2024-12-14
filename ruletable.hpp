@@ -1,81 +1,61 @@
 #ifndef __RULETABLE_H
 #define __RULETABLE_H
 
-#include <stdint.h>
+#include "endian.hpp"
+#include "logger.hpp" /* for reason_t */
+#include "packet.hpp"
+#include <array>
+#include <shared_mutex>
 #include <stddef.h>
-#include "packet.h"
-#include "endian.h"
+#include <stdint.h>
 
-#define MAX_NB_RULES 500
-#define RULETABLE_SIZE 1024
-#define RULETABLE_SHM_KEY "/ruletable"
+#define MAX_NB_RULES   500
+#define RULETABLE_SIZE (MAX_NB_RULES * sizeof(rule_entry))
 
 typedef uint64_t table_entry;
 
 typedef enum {
-	MATCH,
-	NO_MATCH,
+    MATCH,
+    NO_MATCH,
 } rule_match;
 
-typedef rule_match(* cmp_rule_fn)(table_entry pkt_prop, table_entry rule_prop);
-
-/* number of fields in `struct rule` */
-#define NB_RULE_FIELDS 8
-struct rule {
-	union {
-		table_entry direction_entry;
-		direction direction;
-	};
-	union {
-		table_entry saddr_entry;
-		be32_t saddr;
-	};
-	union {
-		table_entry daddr_entry;
-		be32_t daddr;
-	};
-	union {
-		table_entry proto_entry;
-		be16_t proto;
-	};
-	union {
-		table_entry sport_entry;
-		be16_t sport;
-	};
-	union {
-		table_entry dport_entry;
-		be16_t dport;
-	};
-	union {
-		table_entry ack_entry;
-		uint64_t ack;
-	};
-	union {
-		table_entry action_entry;
-		pkt_dc action;
-	};
-};
+typedef rule_match (*cmp_rule_fn)(table_entry pkt_prop, table_entry rule_prop);
 
 #define RULE_NAME_MAXLEN 20
 
+struct decision_info {
+    int    rule_idx;
+    pkt_dc decision;
+    /* either REASON_NO_RULE or REASON_RULE */
+    reason_t reason;
+};
+
 struct rule_entry {
-	char name[RULE_NAME_MAXLEN];
-	/* union for accessing fields by name and by index, to enable iterating over table columns by index AND by name */
-	union {
-		struct rule field;
-		table_entry rule[NB_RULE_FIELDS];
-	};
+    std::array<char, RULE_NAME_MAXLEN> name;
+
+    direction direction;
+    be32_t    saddr;
+    be32_t    daddr;
+    be16_t    proto;
+    be16_t    sport;
+    be16_t    dport;
+    uint64_t  ack;
+    pkt_dc    action;
 };
 
 struct ruletable {
-	struct rule_entry rule_entry[MAX_NB_RULES];
-	size_t nb_rules;
+    /* TODO: lock per rule_entry? */
+    /* reader-writer lock - lock.lock_shared() is reader lock, lock.lock() is
+     * writer lock */
+    std::shared_mutex                    ruletable_rwlock;
+    std::array<rule_entry, MAX_NB_RULES> rule_entry_arr;
+    size_t                               nb_rules;
+
+    ruletable() : nb_rules(0) {}
+    int           add_rule(rule_entry rule);
+    decision_info query(pkt_props *pkt);
 };
 
-int init_ruletable(struct ruletable*);
-
-int add_rule(struct ruletable* table, struct rule_entry rule);
-
-pkt_dc query_ruletable(struct ruletable* table, struct pkt_props* pkt);
+int start_ruletable();
 
 #endif /* __RULETABLE_H */

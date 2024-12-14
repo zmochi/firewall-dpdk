@@ -1,48 +1,50 @@
-#include "ruletable.h"
+#include "firewall.hpp"
+#include "logger.hpp"
+#include "ruletable.hpp"
+#include "utils.h"
 
+#include <new>
 #include <unistd.h>
 
 /* shared memory: */
-#include <stdlib.h>
+#include <fcntl.h>
+#include <mqueue.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <fcntl.h>
-
-#include "firewall.h"
-
-#define RULETABLE_SHM_MODE 600
 
 int main(void) {
-	//int ruletable_fd = shm_open(RULETABLE_SHM_KEY, O_RDWR, RULETABLE_SHM_MODE);
-	//struct ruletable* ruletable = mmap(NULL, RULETABLE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, ruletable_fd, 0);
-	
-	struct ruletable* ruletable = mmap(NULL, RULETABLE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	init_ruletable(ruletable);
+  ruletable *ruletable =
+      new (mmap(NULL, RULETABLE_SIZE, PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANONYMOUS, -1, 0)) struct ruletable;
 
-
-	int logger_pid = fork();
-	if(logger_pid == 0) {
-		int log_pipe[2];
-		if(pipe(log_pipe) < 0){
-			ERROR("Couldn't create logging pipe");
-		}
-
-		int log_write_fd = log_pipe[1], log_read_fd = log_pipe[0];
-
-		int fw_pid = fork();
-		if(fw_pid == 0) {
-			/* firewall process */
-			close(log_read_fd);
-			start_firewall(0, NULL, ruletable, log_write_fd);
-		} else if (fw_pid < 0) {
-			/* error in fork */
-		}
-		
-		close(log_write_fd);
-		start_logger();
-	} else if (logger_pid < 0) {
-		/* err on fork */
+  int logger_pid = fork();
+  if (logger_pid == 0) {
+#define MAX_MQ_MSGS (1 << 14)
+    mq_attr mqueue_attributes = {.mq_maxmsg = MAX_MQ_MSGS,
+                                 .mq_msgsize = sizeof(log_row_t)};
+    mqd_t mqueue = mq_open("/log_mqueue", O_CREAT | O_RDWR | O_EXCL, 600,
+                           &mqueue_attributes);
+	if(mqueue == -1) {
+		ERROR("Error creating POSIX message queue");
 	}
 
-	start_ruletable();
+    int fw_pid = fork();
+    if (fw_pid == 0) {
+      /* third process, firewall process */
+      start_firewall(0, NULL, ruletable, int_net_mac, ext_net_mac, mqueue);
+    } else if (fw_pid < 0) {
+      /* error in fork */
+    }
+
+	log_list logger = log_list(mqueue);
+
+	/* second process handles logs */
+    logger.start_logger();
+  } else if (logger_pid < 0) {
+    /* err on fork */
+  }
+
+  /* main process handles ruletable */
+  /* create named Unix socket, backed by file somewhere in the file system to handle show_rules, load_rules and so on */
+  start_ruletable();
 }
