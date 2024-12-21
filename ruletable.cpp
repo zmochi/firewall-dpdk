@@ -4,39 +4,100 @@
 
 #include <cstdlib>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "ruletable_interface.hpp"
 
-int start_ruletable() {
+static constexpr auto RULETABLE_INTERFACE_BACKLOG = 10;
+
+int recv_size(int fd, void *buf, size_t len) {
+    size_t bytes_recv = 0;
+    while ( bytes_recv < len )
+        if ( recv(fd, (char *)buf + bytes_recv, len - bytes_recv, 0) < 0 )
+            return -1;
+
+    return 0;
+}
+
+int send_size(int fd, void *buf, size_t len) {
+    size_t bytes_sent = 0;
+    while ( bytes_sent < len ) {
+        if ( send(fd, buf, len, 0) < 0 ) return -1;
+    }
+
+    return 0;
+}
+
+int start_ruletable(struct ruletable &ruletable) {
     /* create named Unix socket, backed by file somewhere in the file system to
      * handle show_rules, load_rules and so on */
-    if ( mkfifo(RULETABLE_INTERFACE_PATH,
-                RULETABLE_INTERFACE_PIPE_PERMISSIONS) < 0 ) {
-        ERROR("Couldn't create ruletable interface named pipe");
-        return -1;
-    }
+    struct sockaddr_un unix_sock_opts = {.sun_family = AF_UNIX};
+    strcpy(unix_sock_opts.sun_path, RULETABLE_INTERFACE_PATH);
 
-    int ruletable_interface_fd = open(RULETABLE_INTERFACE_PATH, O_RDONLY);
+    int ruletable_interface_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if ( ruletable_interface_fd < 0 ) {
-        ERROR("Couldn't open ruletable interface named pipe");
+        ERROR("Couldn't open ruletable interface socket");
         return -1;
     }
 
+    int err = bind(ruletable_interface_fd, (struct sockaddr *)&unix_sock_opts,
+                   strlen(RULETABLE_INTERFACE_PATH) +
+                       sizeof(unix_sock_opts.sun_family));
+    if ( err < 0 ) {
+        ERROR("Couldn't bind ruletable interface socket");
+        return -1;
+    }
+
+    if(listen(ruletable_interface_fd, RULETABLE_INTERFACE_BACKLOG) < 0) {
+		ERROR("Couldn't listen on ruletable interface socket");
+		return -1;
+	}
+
+    int              new_sockfd;
+    int              bytes_recv, bytes_sent;
     ruletable_action action;
     char             new_ruletable_path[RULETABLE_PATH_MAXLEN];
 
     while ( 1 ) {
-        read(ruletable_interface_fd, &action, sizeof(action));
+        int new_sockfd = accept(ruletable_interface_fd, nullptr, nullptr);
+        if ( new_sockfd < 0 ) {
+            ERROR("Couldn't accept ruletable interface connection on socket");
+            return -1;
+        }
+
+        if ( recv_size(new_sockfd, &action, sizeof(action)) < 0 )
+            ERROR("Couldn't receive action from ruletable interface socket");
+
+        bytes_recv = 0;
+        bytes_sent = 0;
         switch ( action ) {
-        LOAD_RULETABLE:
-			/* get path */
-        SHOW_RULETABLE:
-        RST_RULETABLE:
-        default:
-            printf("Unknown ruletable action\n");
-            continue;
+            case LOAD_RULETABLE:
+                /* get RULETABLE_PATH_MAXLEN bytes, path padded with null bytes
+                 * return DONE, 4 bytes when finished */
+                if ( recv_size(new_sockfd, new_ruletable_path,
+                               RULETABLE_PATH_MAXLEN) < 0 ) {
+                    ERROR("Couldn't receive new path from ruletable interface "
+                          "socket");
+                    return -1;
+                }
+
+                replace_ruletable(new_ruletable_path, RULETABLE_PATH_MAXLEN);
+                break;
+
+            case SHOW_RULETABLE:
+                /* send sizeof(struct ruletable) bytes containing the entire
+                 * ruletable struct? */
+                ruletable.ruletable_rwlock.lock_shared();
+                send_size(new_sockfd, &ruletable, sizeof(ruletable));
+                ruletable.ruletable_rwlock.unlock();
+                break;
+
+            default:
+                printf("Unknown ruletable action\n");
+                continue;
         }
     }
 }

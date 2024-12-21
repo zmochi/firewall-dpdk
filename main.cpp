@@ -60,5 +60,5 @@ int main(int argc, char *argv[]) {
     }
 
     /* main process handles ruletable */
-    start_ruletable();
+    start_ruletable(*ruletable);
 }

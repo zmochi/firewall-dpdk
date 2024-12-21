@@ -6,6 +6,7 @@
 #include "packet.hpp"
 #include <array>
 #include <shared_mutex>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,13 +48,13 @@ struct ruletable {
      * writer lock */
     std::shared_mutex                    ruletable_rwlock;
     std::array<rule_entry, MAX_NB_RULES> rule_entry_arr;
-    size_t                               nb_rules;
+    atomic_size_t                               nb_rules;
 
     ruletable() : nb_rules(0) {}
     int           add_rule(rule_entry rule);
     decision_info query(pkt_props *pkt, pkt_dc dft_dc);
 };
 
-int start_ruletable();
+int start_ruletable(ruletable& ruletable);
 
 #endif /* __RULETABLE_H */
