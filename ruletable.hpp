@@ -9,26 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MAX_NB_RULES   500
-#define RULETABLE_SIZE (MAX_NB_RULES * sizeof(rule_entry))
-
-typedef uint64_t table_entry;
-
-typedef enum {
-    MATCH,
-    NO_MATCH,
-} rule_match;
-
-typedef rule_match (*cmp_rule_fn)(table_entry pkt_prop, table_entry rule_prop);
-
-#define RULE_NAME_MAXLEN 20
-
-struct decision_info {
-    int    rule_idx;
-    pkt_dc decision;
-    /* either REASON_NO_RULE or REASON_RULE */
-    reason_t reason;
-};
+static constexpr auto RULE_NAME_MAXLEN = 20;
 
 struct rule_entry {
     std::array<char, RULE_NAME_MAXLEN> name;
@@ -43,6 +24,23 @@ struct rule_entry {
     pkt_dc    action;
 };
 
+static constexpr auto MAX_NB_RULES = 500;
+static constexpr auto RULETABLE_SIZE = (MAX_NB_RULES * sizeof(rule_entry));
+
+typedef uint64_t table_entry;
+
+typedef enum {
+    MATCH,
+    NO_MATCH,
+} rule_match;
+
+struct decision_info {
+    int    rule_idx;
+    pkt_dc decision;
+    /* either REASON_NO_RULE or REASON_RULE */
+    reason_t reason;
+};
+
 struct ruletable {
     /* TODO: lock per rule_entry? */
     /* reader-writer lock - lock.lock_shared() is reader lock, lock.lock() is
@@ -53,7 +51,7 @@ struct ruletable {
 
     ruletable() : nb_rules(0) {}
     int           add_rule(rule_entry rule);
-    decision_info query(pkt_props *pkt);
+    decision_info query(pkt_props *pkt, pkt_dc dft_dc);
 };
 
 int start_ruletable();

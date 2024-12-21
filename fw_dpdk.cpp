@@ -121,6 +121,7 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
      */
     struct rte_ether_hdr *eth_hdr =
         rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
+	size_t pktlen = rte_pktmbuf_pkt_len(&pkt);
     if ( eth_hdr->ether_type != ETHTYPE_IPV4 ) return PKT_DROP;
 
     struct rte_ipv4_hdr *ipv4_hdr =
