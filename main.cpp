@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <new>
 #include <unistd.h>
+#include <threads.h>
 
 /* shared memory: */
 #include <fcntl.h>
@@ -14,6 +15,21 @@
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
+struct firewall_thread_args {
+    int               dpdk_eal_argc;
+    char            **dpdk_eal_argv;
+    struct ruletable &ruletable;
+    MAC_addr          int_mac_addr, ext_mac_addr;
+
+	firewall_thread_args(int dpdk_eal_argc, char** dpdk_eal_argv, struct ruletable& ruletable, MAC_addr int_mac_addr, MAC_addr ext_mac_addr) : dpdk_eal_argc(dpdk_eal_argc), dpdk_eal_argv(dpdk_eal_argv), ruletable(ruletable), int_mac_addr(int_mac_addr), ext_mac_addr(ext_mac_addr) {}
+};
+
+void *logger_thread(void *arg) {}
+
+void *firewall_thread(void *arg) {}
+
+void *ruletable_thread(void *arg) {}
 
 int main(int argc, char *argv[]) {
     if ( argc != 2 ) {
@@ -31,9 +47,7 @@ int main(int argc, char *argv[]) {
         ERROR_EXIT("Error parsing external network mac address");
     }
 
-    ruletable *ruletable =
-        new (mmap(NULL, RULETABLE_SIZE, PROT_READ | PROT_WRITE,
-                  MAP_SHARED | MAP_ANONYMOUS, -1, 0)) struct ruletable;
+    ruletable *ruletable = new struct ruletable;
     if ( ruletable == nullptr ) {
         ERROR_EXIT("Error creating ruletable memory");
     }
@@ -50,6 +64,7 @@ int main(int argc, char *argv[]) {
     int fw_pid = fork();
     if ( fw_pid == 0 ) {
         /* third process, firewall process */
+		firewall_thread_args args(0, nullptr, *ruletable, int_net_mac, ext_net_mac);
         if ( start_firewall(0, NULL, ruletable, int_net_mac, ext_net_mac) <
              0 ) {
             ERROR_EXIT("Couldn't start firewall");
