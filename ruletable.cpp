@@ -1,4 +1,5 @@
 #include "ruletable.hpp"
+#include "simple_ipc.hpp"
 #include "utils.h"
 #include <mutex> /* for unique_lock */
 
@@ -13,93 +14,58 @@
 
 static constexpr auto RULETABLE_INTERFACE_BACKLOG = 10;
 
-int recv_size(int fd, void *buf, size_t len) {
-    size_t bytes_recv = 0;
-    while ( bytes_recv < len )
-        if ( recv(fd, (char *)buf + bytes_recv, len - bytes_recv, 0) < 0 )
-            return -1;
-
-    return 0;
+int replace_ruletable(ruletable        &ruletable,
+                      const std::string new_ruletable_path) {
+    char* new_ruletable = load_file(&ruletable.rule_entry_arr, sizeof(rule_entry_arr),
+                   new_ruletable_path); 
+	if(
+        ERROR("Couldn't load file from %s", new_ruletable_path.data());
+        return -1;
+    }
 }
 
-int send_size(int fd, void *buf, size_t len) {
-    size_t bytes_sent = 0;
-    while ( bytes_sent < len ) {
-        if ( send(fd, buf, len, 0) < 0 ) return -1;
-    }
+void ruletable_msg_callback(IPC_Server<ruletable_action> &inst,
+                            ruletable_action action, int msg_sockfd,
+                            void *arg) {
+    ruletable &ruletable = *static_cast<struct ruletable *>(arg);
+    char       new_ruletable_path[RULETABLE_PATH_MAXLEN];
 
-    return 0;
+    switch ( action ) {
+        case LOAD_RULETABLE:
+            /* get RULETABLE_PATH_MAXLEN bytes, path padded with null bytes
+             * return DONE, 4 bytes when finished */
+            if ( inst.recv_size(msg_sockfd, new_ruletable_path,
+                                RULETABLE_PATH_MAXLEN) < 0 ) {
+                ERROR("Couldn't receive new path from ruletable interface "
+                      "socket");
+                return -1;
+            }
+
+            replace_ruletable(new_ruletable_path, RULETABLE_PATH_MAXLEN);
+            break;
+
+        case SHOW_RULETABLE:
+            /* send sizeof(struct ruletable) bytes containing the entire
+             * ruletable struct? */
+            ruletable.ruletable_rwlock.lock_shared();
+            inst.send_size(msg_sockfd, &ruletable, sizeof(ruletable));
+            ruletable.ruletable_rwlock.unlock();
+            break;
+
+        default:
+            printf("Unknown ruletable action\n");
+            return;
+    }
 }
 
 int start_ruletable(struct ruletable &ruletable) {
-    /* create named Unix socket, backed by file somewhere in the file system to
-     * handle show_rules, load_rules and so on */
-    struct sockaddr_un unix_sock_opts = {.sun_family = AF_UNIX};
-    strcpy(unix_sock_opts.sun_path, RULETABLE_INTERFACE_PATH);
+    /* named Unix socket, backed by file somewhere in the file system to
+     * handle show_rules and load_rules */
+    IPC_Server<ruletable_action> server(
+        RULETABLE_INTERFACE_PATH, RULETABLE_INTERFACE_PIPE_PERMISSIONS,
+        RULETABLE_INTERFACE_BACKLOG, ruletable_msg_callback);
 
-    int ruletable_interface_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if ( ruletable_interface_fd < 0 ) {
-        ERROR("Couldn't open ruletable interface socket");
-        return -1;
-    }
-
-    int err = bind(ruletable_interface_fd, (struct sockaddr *)&unix_sock_opts,
-                   strlen(RULETABLE_INTERFACE_PATH) +
-                       sizeof(unix_sock_opts.sun_family));
-    if ( err < 0 ) {
-        ERROR("Couldn't bind ruletable interface socket");
-        return -1;
-    }
-
-    if(listen(ruletable_interface_fd, RULETABLE_INTERFACE_BACKLOG) < 0) {
-		ERROR("Couldn't listen on ruletable interface socket");
-		return -1;
-	}
-
-    int              new_sockfd;
-    int              bytes_recv, bytes_sent;
-    ruletable_action action;
-    char             new_ruletable_path[RULETABLE_PATH_MAXLEN];
-
-    while ( 1 ) {
-        int new_sockfd = accept(ruletable_interface_fd, nullptr, nullptr);
-        if ( new_sockfd < 0 ) {
-            ERROR("Couldn't accept ruletable interface connection on socket");
-            return -1;
-        }
-
-        if ( recv_size(new_sockfd, &action, sizeof(action)) < 0 )
-            ERROR("Couldn't receive action from ruletable interface socket");
-
-        bytes_recv = 0;
-        bytes_sent = 0;
-        switch ( action ) {
-            case LOAD_RULETABLE:
-                /* get RULETABLE_PATH_MAXLEN bytes, path padded with null bytes
-                 * return DONE, 4 bytes when finished */
-                if ( recv_size(new_sockfd, new_ruletable_path,
-                               RULETABLE_PATH_MAXLEN) < 0 ) {
-                    ERROR("Couldn't receive new path from ruletable interface "
-                          "socket");
-                    return -1;
-                }
-
-                replace_ruletable(new_ruletable_path, RULETABLE_PATH_MAXLEN);
-                break;
-
-            case SHOW_RULETABLE:
-                /* send sizeof(struct ruletable) bytes containing the entire
-                 * ruletable struct? */
-                ruletable.ruletable_rwlock.lock_shared();
-                send_size(new_sockfd, &ruletable, sizeof(ruletable));
-                ruletable.ruletable_rwlock.unlock();
-                break;
-
-            default:
-                printf("Unknown ruletable action\n");
-                continue;
-        }
-    }
+    server.start_server(&ruletable);
 }
 
 int ruletable::add_rule(rule_entry rule) {
