@@ -16,6 +16,7 @@ typedef enum : uint8_t {
 typedef enum : uint8_t {
   IN,
   OUT,
+  UNSPEC,
   NUL_DIRECTION,
 } direction;
 

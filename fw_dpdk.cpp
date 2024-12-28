@@ -149,7 +149,7 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
         dc = PKT_DROP;
         reason = REASON_XMAS_PKT;
     } else {
-        decision_info dc_info = ruletable.query(&pkt_props);
+        decision_info dc_info = ruletable.query(&pkt_props, PKT_DROP);
         dc = dc_info.decision;
         /* either REASON_NO_RULE or REASON_RULE */
         reason = dc_info.reason;

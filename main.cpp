@@ -5,6 +5,7 @@
 #include "utils.h"
 
 #include <cstdlib>
+#include <iostream>
 #include <new>
 #include <unistd.h>
 
@@ -17,7 +18,7 @@
 
 int main(int argc, char *argv[]) {
     if ( argc != 2 ) {
-        PRINT_USAGE();
+		std::cout << "Usage:" << argv[0] << "<internal NIC MAC address> <external NIC MAC address>" << std::endl;
     }
 
     /* TODO: move tests to a normal location */
@@ -60,5 +61,8 @@ int main(int argc, char *argv[]) {
     }
 
     /* main process handles ruletable */
-    start_ruletable(*ruletable);
+    if(start_ruletable(*ruletable) < 0) {
+		ERROR("Couldn't start ruletable process");
+		return -1;
+	}
 }
