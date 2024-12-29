@@ -140,7 +140,16 @@ bool cmp_ipaddr(be32_t ip1, be32_t ip2, be32_t mask) {
 }
 
 bool cmp_port(be16_t port1, be16_t port2, be16_t port_mask) {
-    return (port1 & port_mask) == (port2 & port_mask);
+    if ( port_mask & PORT_LT )
+        return port2 < port1;
+    else if ( port_mask & PORT_GT )
+        return port2 > port1;
+    else if ( port_mask & PORT_EQ )
+        return port1 == port2;
+    else {
+        ERROR("Unknown port mask");
+        return false;
+    }
 }
 
 bool cmp_ack(ack_t rule_ack, uint64_t pkt_tcp_flags) {
@@ -157,7 +166,11 @@ bool cmp_ack(ack_t rule_ack, uint64_t pkt_tcp_flags) {
     }
 }
 
-bool cmp_proto(proto p1, proto p2) { return p1 == p2; }
+bool cmp_proto(proto rule_proto, proto pkt_proto) {
+    if ( rule_proto == PROTO_ANY ) return true;
+
+    return rule_proto == pkt_proto;
+}
 
 decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
     using namespace std;

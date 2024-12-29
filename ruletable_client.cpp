@@ -14,8 +14,20 @@
 constexpr auto   RULE_FIELD_DELIM = ' ';
 constexpr auto   RULE_NB_FIELDS = 9;
 constexpr be32_t IPADDR_ANY_MASK = 0x0000'0000;
-constexpr be16_t PORT_ANY_MASK = 0x0000;
 
+/* helper function
+ * calculates len of a field, given a pair of start and end indices */
+static int field_len(std::pair<int, int> field_idx) {
+    return field_idx.second - field_idx.first;
+}
+
+/* @brief parses a line according to a char that delimits each field (for
+ * example space or tab) and a 'line end char' for example null byte or new
+ * line.
+ *
+ * @return a list of pairs <start index, end index> where start index is the
+ * index of the first char of the field, and end index is the index of the
+ * field_delim right after that field */
 std::vector<std::pair<int, int>> parse_line(const char *rule, char field_delim,
                                             char field_end_char) {
     std::vector<std::pair<int, int>> field_indices;
@@ -28,15 +40,11 @@ std::vector<std::pair<int, int>> parse_line(const char *rule, char field_delim,
     int ch_idx = 0;
 
     do {
-        field_indices.at(field_idx).first = ch_idx;
+        field_indices.push_back({ch_idx, 0});
         do {
             cur_char = rule[ch_idx++];
         } while ( cur_char != field_delim && cur_char != field_end_char );
-        field_indices.at(field_idx).second = ch_idx;
-        /* move to next field */
-        field_idx++;
-        /* move to first char of next field */
-        ch_idx++;
+        field_indices.back().second = ch_idx - 1;
     } while ( cur_char != field_end_char );
 
     return field_indices;
@@ -58,7 +66,7 @@ int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
         auto idx_pair = field_indices.at(i);
 
         ip_field_val = std::stoi(ipaddr_str.substr(
-            idx_pair.first, idx_pair.second - idx_pair.first - 1));
+            idx_pair.first, idx_pair.second - idx_pair.first));
 
         if ( !(0 <= ip_field_val && ip_field_val <= 255) ) {
             ERROR("IP address field is not in the range [0,255]");
@@ -66,39 +74,81 @@ int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
         }
 
         /* big endian calculation */
-        ipaddr_val += ip_field_val * (1 << i);
+        ipaddr_val += ip_field_val * (1 << (i * 8)); /* =ip_field_val*(256^i) */
     }
 
     /* set ip address value, big endian */
     *ipaddr_dest = ipaddr_val;
 
     /* parse mask */
-    std::pair<int, int> mask_idx_pair = {
-        field_indices.at(field_indices.size() - 1).second + 1,
-        ipaddr_str.size() - 1};
+    std::pair<int, int> mask_idx_pair = {field_indices.back().second + 1,
+                                         ipaddr_str.size()};
 
     assert(ipaddr_str.at(mask_idx_pair.first - 1) == '/');
 
-    int mask_val =
-        std::stoi(ipaddr_str.substr(mask_idx_pair.first, mask_idx_pair.second));
+    int mask_val = std::stoi(
+        ipaddr_str.substr(mask_idx_pair.first, field_len(mask_idx_pair)));
 
     if ( !(0 <= mask_val && mask_val <= 32) ) {
         ERROR("IP address mask not in range [0,32]");
         return -1;
     }
 
-    if ( mask_val == 0 )
-        *ipaddr_dest_mask = 0;
-    else
-        *ipaddr_dest_mask =
-            (1 << (sizeof(be32_t) - 1) * CHAR_BIT) >> (mask_val - 1);
+    /* cast to uint64_t is needed, since the shift size could be 32, and
+     * shifting by width of a type is UB */
+    *ipaddr_dest_mask =
+        (be32_t)((~(uint64_t)0) << (sizeof(be32_t) * CHAR_BIT - mask_val));
 
     return 0;
 }
 int parse_port(const std::string &port_str, be16_t *port_dest,
                be16_t *port_mask) {
-    *port_mask = PORT_ANY_MASK;
-    return std::stoi(port_str);
+    std::string str_to_parse;
+    switch ( port_str.at(0) ) {
+        case '<':
+            *port_mask = PORT_LT;
+            str_to_parse = port_str.substr(1, port_str.size() - 1);
+            break;
+        case '>':
+            *port_mask = PORT_GT;
+            str_to_parse = port_str.substr(1, port_str.size() - 1);
+            break;
+        case '0':
+            [[fallthrough]];
+        case '1':
+            [[fallthrough]];
+        case '2':
+            [[fallthrough]];
+        case '3':
+            [[fallthrough]];
+        case '4':
+            [[fallthrough]];
+        case '5':
+            [[fallthrough]];
+        case '6':
+            [[fallthrough]];
+        case '7':
+            [[fallthrough]];
+        case '8':
+            [[fallthrough]];
+        case '9':
+            *port_mask = PORT_EQ;
+            str_to_parse = port_str;
+            break;
+        default:
+            ERROR("Unknown port format");
+            return -1;
+    }
+
+    int    port_val = std::stoi(str_to_parse);
+    be16_t PORT_MAX = 0xFFFFU;
+    if ( port_val > PORT_MAX || port_val < 0 ) {
+        ERROR("Port value too big or negative");
+        return -1;
+    }
+
+    *port_dest = (be16_t)port_val;
+    return 0;
 }
 
 int parse_rule(const char *rule /* delimited by null byte */,
@@ -110,19 +160,14 @@ int parse_rule(const char *rule /* delimited by null byte */,
     /* value for parse_field to return on "any" string when parsing */
     constexpr int ANY = 0x1;
 
-    int name_field_idx = 1, direction_field_idx = 2, saddr_field_idx = 3,
-        daddr_field_idx = 4, proto_field_idx = 5, sport_field_idx = 6,
-        dport_field_idx = 7, ack_field_idx = 8, action_field_idx = 9;
-
-    /* calculates len of a field, given a pair of start and end indices */
-    auto field_len = [](std::pair<int, int> idx_pair) {
-        return idx_pair.second - idx_pair.first - 1;
-    };
+    int name_field_idx = 0, direction_field_idx = 1, saddr_field_idx = 2,
+        daddr_field_idx = 3, proto_field_idx = 4, sport_field_idx = 5,
+        dport_field_idx = 6, ack_field_idx = 7, action_field_idx = 8;
 
     /* `list` is a list of pairs <expected string, value to return on string
      * match> */
     auto match_field =
-        [&field_indices, field_len,
+        [&field_indices,
          &rule](int                                                 field_idx,
                 std::initializer_list<std::pair<const char *, int>> list,
                 int no_match_code) {
@@ -141,13 +186,14 @@ int parse_rule(const char *rule /* delimited by null byte */,
     /* parse name */
     std::pair name_indices = field_indices[name_field_idx];
     int       name_len = field_len(name_indices);
-    if ( name_len > rule_entry.name.size() ) {
+    if ( name_len >
+         rule_entry.name.size() - 1 /* -1 save space for nul byte*/ ) {
         ERROR("Rule name `%.*s`... too long, maximum length is %d characters",
               RULE_NAME_MAXLEN, &rule[name_indices.first], RULE_NAME_MAXLEN);
         return -1;
     }
-    memcpy(&rule_entry.name[name_field_idx], &rule[name_indices.first],
-           name_len);
+    memcpy(rule_entry.name.data(), &rule[name_indices.first], name_len);
+    rule_entry.name[name_indices.second] = '\0';
 
     std::string rule_name(&rule[name_indices.first], name_len);
 
@@ -182,7 +228,7 @@ int parse_rule(const char *rule /* delimited by null byte */,
                      std::string(&rule[field_indices[saddr_field_idx].first],
                                  field_len(field_indices[saddr_field_idx])),
                      &rule_entry.saddr, &rule_entry.saddr_mask) < 0 ) {
-                ERROR("Couldn't parse destination port for rule %s",
+                ERROR("Couldn't parse source IP address for rule %s",
                       rule_name.data());
                 return -1;
             }
@@ -203,28 +249,52 @@ int parse_rule(const char *rule /* delimited by null byte */,
                      std::string(&rule[field_indices[daddr_field_idx].first],
                                  field_len(field_indices[daddr_field_idx])),
                      &rule_entry.daddr, &rule_entry.daddr_mask) < 0 ) {
-                ERROR("Couldn't parse destination port for rule %s",
+                ERROR("Couldn't parse destination IP address for rule %s",
                       rule_name.data());
                 return -1;
             }
             break;
 
         default:
-            ERROR("Source address field can't be recognized for rule %s",
+            ERROR("Destination address field can't be recognized for rule %s",
+                  rule_name.data());
+            return -1;
+    }
+
+    switch ( match_field(
+        proto_field_idx,
+        {{"any", PROTO_ANY}, {"TCP", TCP}, {"UDP", UDP}, {"ICMP", ICMP}},
+        -1) ) {
+        case PROTO_ANY:
+            rule_entry.proto = PROTO_ANY;
+            break;
+        case TCP:
+            rule_entry.proto = TCP;
+            break;
+        case UDP:
+            rule_entry.proto = UDP;
+            break;
+        case ICMP:
+            rule_entry.proto = ICMP;
+            break;
+        default:
+            ERROR("Protocol field can't be recognized for rule %s",
                   rule_name.data());
             return -1;
     }
 
     switch ( match_field(sport_field_idx, {{"any", ANY}}, -1) ) {
         case ANY:
-            rule_entry.sport_mask = PORT_ANY_MASK;
+            rule_entry.sport_mask = PORT_ANY;
             break;
         case -1:
+            static_assert(sizeof(rule_entry.sport_mask) == sizeof(be16_t));
             if ( parse_port(
                      std::string(&rule[field_indices[sport_field_idx].first],
                                  field_len(field_indices[sport_field_idx])),
-                     &rule_entry.sport, &rule_entry.sport_mask) < 0 ) {
-                ERROR("Couldn't parse destination port for rule %s",
+                     &rule_entry.sport,
+                     (be16_t *)&rule_entry.sport_mask) < 0 ) {
+                ERROR("Couldn't parse source port for rule %s",
                       rule_name.data());
                 return -1;
             }
@@ -237,13 +307,15 @@ int parse_rule(const char *rule /* delimited by null byte */,
 
     switch ( match_field(dport_field_idx, {{"any", ANY}}, -1) ) {
         case ANY:
-            rule_entry.dport_mask = PORT_ANY_MASK;
+            rule_entry.dport_mask = PORT_ANY;
             break;
         case -1:
+            static_assert(sizeof(rule_entry.dport_mask) == sizeof(be16_t));
             if ( parse_port(
                      std::string(&rule[field_indices[dport_field_idx].first],
                                  field_len(field_indices[dport_field_idx])),
-                     &rule_entry.dport, &rule_entry.dport_mask) < 0 ) {
+                     &rule_entry.dport,
+                     (be16_t *)&rule_entry.dport_mask) < 0 ) {
                 ERROR("Couldn't parse destination port for rule %s",
                       rule_name.data());
                 return -1;
@@ -301,7 +373,7 @@ load_ruletable_from_file(const std::string &filepath) {
     size_t   rule_line_len;
     size_t   line_idx = 0;
     ifstream ruletable_file(filepath, ios_base::in);
-    while ( ruletable_file.getline(&rule_line[0], MAX_RULE_LINE_LEN) ) {
+    while ( ruletable_file.getline(&rule_line[0], rule_line.size()) ) {
         rule_entry rule;
         line_idx++;
         if ( parse_rule(rule_line.data(), rule) < 0 ) {
@@ -314,7 +386,7 @@ load_ruletable_from_file(const std::string &filepath) {
     return rt;
 }
 
-int load_ruletable(ruletable &rt, const std::string& ruletable_send_path) {
+int load_ruletable(ruletable &rt, const std::string &ruletable_send_path) {
 
     /* ruletable_action is an enum containing actions the client can send to the
      * server */
@@ -347,4 +419,95 @@ int load_ruletable(ruletable &rt, const std::string& ruletable_send_path) {
     }
 
     return 0;
+}
+
+int parse_line_test() {
+    const std::string line1 = "one two three/ff";
+
+    auto line_indices = parse_line(line1.c_str(), ' ', '/');
+    assert(line_indices.size() == 3);
+    assert(line1.substr(line_indices.at(0).first,
+                        field_len(line_indices.at(0))) == "one");
+    assert(line1.substr(line_indices.at(1).first,
+                        field_len(line_indices.at(1))) == "two");
+    assert(line1.substr(line_indices.at(2).first,
+                        field_len(line_indices.at(2))) == "three");
+
+    std::cout << "Line parsing test successful" << std::endl;
+    return 0;
+}
+
+int parse_ipaddr_test() {
+    const std::string ipaddr_1 = "1.2.3.4/32";
+    const std::string ipaddr_2 = "1.2.3.4/0";
+
+    be32_t ipaddr_dest, ipaddr_mask;
+    if ( parse_ipaddr(ipaddr_1, &ipaddr_dest, &ipaddr_mask) < 0 ) {
+        ERROR("Couldn't parse IP address");
+        return -1;
+    }
+    assert(ipaddr_dest == 1 + 2 * 256 + 3 * 256 * 256 + 4 * 256 * 256 * 256);
+    assert(ipaddr_mask == 0xFFFF'FFFFU);
+
+    if ( parse_ipaddr(ipaddr_2, &ipaddr_dest, &ipaddr_mask) < 0 ) {
+        ERROR("Couldn't parse IP address");
+        return -1;
+    }
+
+    assert(ipaddr_dest == 1 + 2 * 256 + 3 * 256 * 256 + 4 * 256 * 256 * 256);
+    assert(ipaddr_mask == 0);
+
+    std::cout << "IP address parse test successful" << std::endl;
+    return 0;
+}
+
+int parse_rule_test() {
+    const std::string rule1_input =
+        "loopback any 127.0.0.1/8 127.255.2.1/32 any any any any accept";
+    const std::string rule2_input =
+        "telnet2 in 0.0.0.0/0 10.0.1.1/24 TCP 23 >1023 yes accept";
+    rule_entry rule1_output;
+    rule_entry rule2_output;
+
+    if ( parse_rule(rule1_input.c_str(), rule1_output) < 0 ) {
+        ERROR("Error parsing rule 1");
+        return -1;
+    }
+
+    if ( parse_rule(rule2_input.c_str(), rule2_output) < 0 ) {
+        ERROR("Error parsing rule 2");
+        return -1;
+    }
+
+    assert(std::string(rule1_output.name.data()) == std::string("loopback"));
+    assert(rule1_output.direction == UNSPEC);
+    assert(rule1_output.saddr ==
+           127 + 0 * 256 + 0 * 256 * 256 + 1 * 256 * 256 * 256);
+    assert(rule1_output.saddr_mask == 0b11111111000000000000000000000000);
+    assert(rule1_output.daddr ==
+           127 + 255 * 256 + 2 * 256 * 256 + 1 * 256 * 256 * 256);
+    assert(rule1_output.daddr_mask == 0xFFFF'FFFFU);
+    assert(rule1_output.proto == PROTO_ANY);
+    /* when port is `any`, sport/dport fields isn't assigned */
+    assert(rule1_output.sport_mask == PORT_ANY);
+    assert(rule1_output.dport_mask == PORT_ANY);
+    assert(rule1_output.action == PKT_PASS);
+
+    assert(std::string(rule2_output.name.data()) == std::string("telnet2"));
+    assert(rule2_output.direction == IN);
+    assert(rule2_output.saddr_mask == 0);
+    assert(rule2_output.daddr_mask == 0b11111111111111111111111100000000);
+    assert(rule2_output.proto == TCP);
+    assert(rule2_output.sport_mask == PORT_EQ);
+    assert(rule2_output.dport_mask == PORT_GT);
+    assert(rule2_output.action == PKT_PASS);
+
+    std::cout << "Rule parse test successful" << std::endl;
+    return 0;
+}
+
+int main(void) {
+    parse_line_test();
+    parse_ipaddr_test();
+    parse_rule_test();
 }

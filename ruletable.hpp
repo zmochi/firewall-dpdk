@@ -19,6 +19,14 @@ typedef enum {
     ACK_ANY = ACK_NO | ACK_YES,
 } ack_t;
 
+/* how to compare a port number */
+enum port_cmp : be16_t {
+    PORT_LT = 0x01, /* less than */
+    PORT_GT = 0x02, /* greater than */
+    PORT_EQ = 0x04, /* equal only */
+	PORT_ANY = 0x08, /* don't do comparison, allow all ports */
+};
+
 struct rule_entry {
     std::array<char, RULE_NAME_MAXLEN> name;
 
@@ -29,9 +37,9 @@ struct rule_entry {
     be32_t    daddr_mask;
     proto     proto;
     be16_t    sport;
-    be16_t    sport_mask;
+    port_cmp  sport_mask;
     be16_t    dport;
-    be16_t    dport_mask;
+    port_cmp  dport_mask;
     ack_t     ack;
     pkt_dc    action;
 

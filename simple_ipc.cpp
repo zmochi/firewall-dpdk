@@ -15,10 +15,10 @@
  * which takes in a specific function with a specific signature, but their
  * arguments differ - the second `buf` arguments is const in send and non-const
  * in recv. :( */
-ssize_t send_wp(int fd, void *buf, size_t len, int flags) {
+static ssize_t send_wp(int fd, void *buf, size_t len, int flags) {
     return send(fd, buf, len, flags);
 }
-ssize_t recv_wp(int fd, void *buf, size_t len, int flags) {
+static ssize_t recv_wp(int fd, void *buf, size_t len, int flags) {
     return recv(fd, buf, len, flags);
 }
 
@@ -60,34 +60,39 @@ int IPC_Server<actionEnum>::start_server(void *user_arg) {
                    sizeof(unix_sock_opts));
     if ( err < 0 ) {
         ERROR("Couldn't bind IPC server socket");
+        switch ( err ) {}
         return -1;
     }
 
-	int ret;
+    int ret;
     /* TODO: fchown() to set perms */
-	if((ret=chmod(msgfile_path.data(), msgfile_perms)) < 0) {
-		ERROR("Couldn't set permissions to file %s", msgfile_path.data());
-		switch(ret) {
-			case EACCES:
-				std::cout << "eaccess" << std::endl;
-				break;
-			case EFAULT:
-				std::cout << "efault" << std::endl;
-				break;
-			case ENOENT:
-				std::cout << "enoent" << std::endl;
-				break;
-			default:
-				std::cout << "some err??" << std::endl;
-				break;
-		}
-		return -1;
-	}
+    if ( (ret = chmod(msgfile_path.data(), msgfile_perms)) < 0 ) {
+        ERROR("Couldn't set permissions to file %s", msgfile_path.data());
+        //switch ( ret ) {
+        //    case EACCES:
+        //        std::cout << "eaccess" << std::endl;
+        //        break;
+        //    case EFAULT:
+        //        std::cout << "efault" << std::endl;
+        //        break;
+        //    case ENOENT:
+        //        std::cout << "enoent" << std::endl;
+        //        break;
+        //    default:
+        //        std::cout << "some err??" << std::endl;
+        //        break;
+        //}
+        return -1;
+    }
+
+	std::cout << "Bind + chmod" << std::endl;
 
     if ( listen(listen_sockfd, server_backlog) < 0 ) {
         ERROR("Couldn't listen on IPC server socket");
         return -1;
     }
+
+	std::cout << "Listen" << std::endl;
 
     int        new_sockfd;
     size_t     msg_size;
@@ -95,6 +100,7 @@ int IPC_Server<actionEnum>::start_server(void *user_arg) {
 
     while ( 1 ) {
         new_sockfd = accept(listen_sockfd, nullptr, nullptr);
+		std::cout << "Accepted connection" << std::endl;
         if ( new_sockfd < 0 ) {
             ERROR("Couldn't accept IPC server connection on socket");
             return -1;
@@ -221,7 +227,7 @@ const std::string ruletable_path = "/dev/test_simple_ipc";
 enum simple_ipc_code {
     HELLO = 0x1,
 };
-void simple_ipc_tests() {
+static void simple_ipc_tests() {
     /* create file */
     close(open(ruletable_path.data(), O_CREAT, 0));
 
@@ -229,11 +235,11 @@ void simple_ipc_tests() {
         /* client process */
         IPC_Client<simple_ipc_code> client(ruletable_path);
         char                        msg[40] = "hello from client";
-		ssize_t ret = client.send_action(HELLO);
-		if(ret < 0) {
-			ERROR("failed sending client action HELLO");
-			return;
-		}
+        ssize_t                     ret = client.send_action(HELLO);
+        if ( ret < 0 ) {
+            ERROR("failed sending client action HELLO");
+            return;
+        }
 
         ret = client.send_size(msg, strlen(msg));
         if ( ret < 0 ) {

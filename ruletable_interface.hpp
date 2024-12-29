@@ -1,3 +1,6 @@
+#ifndef __RULETABLE_INTERFACE_H
+#define __RULETABLE_INTERFACE_H
+
 #include <cstdint>
 
 #define RULETABLE_INTERFACE_PATH "/dev/ruletable"
@@ -13,3 +16,5 @@ enum ruletable_action : uint32_t {
     OK = BIT(4),
     BAD_MSG = BIT(5),
 };
+
+#endif /* __RULETABLE_INTERFACE_H */
