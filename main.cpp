@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <new>
+#include <thread>
 #include <unistd.h>
 
 /* shared memory: */
@@ -16,6 +17,13 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+void logger_thread(log_list &logger) {
+
+}
+
+void log_filewriter(log_list &logger, const std::string_view log_writepath) {
+}
+
 int main(int argc, char *argv[]) {
     if ( argc != 2 ) {
 		std::cout << "Usage:" << argv[0] << "<internal NIC MAC address> <external NIC MAC address>" << std::endl;
@@ -23,12 +31,11 @@ int main(int argc, char *argv[]) {
 
     /* TODO: move tests to a normal location */
     test_parse_mac_addr();
-    std::string int_mac = std::string(argv[0]), ext_mac = std::string(argv[1]);
     MAC_addr    int_net_mac, ext_net_mac;
-    if ( parse_mac_addr(int_mac, int_net_mac) < 0 ) {
+    if ( parse_mac_addr(argv[0], int_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing internal network mac address");
     }
-    if ( parse_mac_addr(ext_mac, ext_net_mac) < 0 ) {
+    if ( parse_mac_addr(argv[1], ext_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing external network mac address");
     }
 
@@ -42,7 +49,12 @@ int main(int argc, char *argv[]) {
     int logger_pid = fork();
     if ( logger_pid == 0 ) {
         /* second process handles logs */
-        start_logger();
+		log_list logger;
+		/* writes logs to hashmap */
+		std::thread log_recorder(logger_thread, logger);
+		/* writes logs to file on demand etc */
+		std::thread log_writer(log_filewriter, logger);
+        logger.start_logger();
     } else if ( logger_pid < 0 ) {
         /* err on fork */
         ERROR_EXIT("Logger fork failed");
@@ -51,7 +63,7 @@ int main(int argc, char *argv[]) {
     int fw_pid = fork();
     if ( fw_pid == 0 ) {
         /* third process, firewall process */
-        if ( start_firewall(0, NULL, ruletable, int_net_mac, ext_net_mac) <
+        if ( start_firewall(0, NULL, ruletable, int_net_mac, ext_net_mac, logger) <
              0 ) {
             ERROR_EXIT("Couldn't start firewall");
         }
@@ -66,3 +78,4 @@ int main(int argc, char *argv[]) {
 		return -1;
 	}
 }
+

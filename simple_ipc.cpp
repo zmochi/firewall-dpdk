@@ -24,17 +24,19 @@ static ssize_t recv_wp(int fd, void *buf, size_t len, int flags) {
 
 /* signature of send and recv */
 using io_fn = ssize_t (*)(int fd, void *buf, size_t len, int flags);
+
+/* helper function to wrap recurring pattern for both send() and recv(). send_wp() and recv_wp() are equivalent to send() and recv() */
 template <io_fn fn> size_t io_helper(int fd, void *buf, size_t len) {
-    size_t bytes_sent = 0;
+    size_t bytes_sent_or_recv = 0;
     size_t ret;
 
-    while ( bytes_sent < len ) {
-        if ( (ret = fn(fd, (char *)buf + bytes_sent, len - bytes_sent, 0)) < 0 )
+    while ( bytes_sent_or_recv < len ) {
+        if ( (ret = fn(fd, (char *)buf + bytes_sent_or_recv, len - bytes_sent_or_recv, 0)) < 0 )
             return -1;
-        bytes_sent += ret;
+        bytes_sent_or_recv += ret;
     }
 
-    return bytes_sent;
+    return bytes_sent_or_recv;
 }
 
 template <typename actionEnum>
@@ -65,34 +67,15 @@ int IPC_Server<actionEnum>::start_server(void *user_arg) {
     }
 
     int ret;
-    /* TODO: fchown() to set perms */
     if ( (ret = chmod(msgfile_path.data(), msgfile_perms)) < 0 ) {
         ERROR("Couldn't set permissions to file %s", msgfile_path.data());
-        //switch ( ret ) {
-        //    case EACCES:
-        //        std::cout << "eaccess" << std::endl;
-        //        break;
-        //    case EFAULT:
-        //        std::cout << "efault" << std::endl;
-        //        break;
-        //    case ENOENT:
-        //        std::cout << "enoent" << std::endl;
-        //        break;
-        //    default:
-        //        std::cout << "some err??" << std::endl;
-        //        break;
-        //}
         return -1;
     }
-
-	std::cout << "Bind + chmod" << std::endl;
 
     if ( listen(listen_sockfd, server_backlog) < 0 ) {
         ERROR("Couldn't listen on IPC server socket");
         return -1;
     }
-
-	std::cout << "Listen" << std::endl;
 
     int        new_sockfd;
     size_t     msg_size;
@@ -100,7 +83,6 @@ int IPC_Server<actionEnum>::start_server(void *user_arg) {
 
     while ( 1 ) {
         new_sockfd = accept(listen_sockfd, nullptr, nullptr);
-		std::cout << "Accepted connection" << std::endl;
         if ( new_sockfd < 0 ) {
             ERROR("Couldn't accept IPC server connection on socket");
             return -1;

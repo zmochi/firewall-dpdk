@@ -505,9 +505,3 @@ int parse_rule_test() {
     std::cout << "Rule parse test successful" << std::endl;
     return 0;
 }
-
-int main(void) {
-    parse_line_test();
-    parse_ipaddr_test();
-    parse_rule_test();
-}

@@ -29,7 +29,7 @@ int parse_mac_addr(std::string_view mac_addr, MAC_addr &maddr) {
                 maddr_byte += mac_addr.at(j) - 'a' + 10;
 
             else {
-                ERROR("Bad MAC addr character at index %d");
+                ERROR("Bad MAC addr character at index %d", j);
                 return -1;
             }
         }

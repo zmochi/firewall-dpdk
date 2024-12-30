@@ -139,13 +139,15 @@ bool cmp_ipaddr(be32_t ip1, be32_t ip2, be32_t mask) {
     return (ip1 & mask) == (ip2 & mask);
 }
 
-bool cmp_port(be16_t port1, be16_t port2, be16_t port_mask) {
+bool cmp_port(be16_t rule_port, be16_t pkt_port, be16_t port_mask) {
     if ( port_mask & PORT_LT )
-        return port2 < port1;
+        return pkt_port < rule_port;
     else if ( port_mask & PORT_GT )
-        return port2 > port1;
+        return pkt_port > rule_port;
     else if ( port_mask & PORT_EQ )
-        return port1 == port2;
+        return rule_port == pkt_port;
+    else if ( port_mask & PORT_ANY )
+        return true;
     else {
         ERROR("Unknown port mask");
         return false;

@@ -8,7 +8,7 @@ constexpr auto RT_MSG_PATH = "/dev/ruletable_iface_test";
 
 int main() {
     if ( fork() == 0 ) {
-        usleep(50);
+        usleep(90);
 		std::cout << "Hello from client" << std::endl;
         auto new_rt = load_ruletable_from_file(NEW_RT_PATH);
         if ( new_rt == nullptr ) {
@@ -29,7 +29,7 @@ int main() {
     }
     ruletable rt;
     if ( start_ruletable(rt, RT_MSG_PATH, 0600) < 0 ) {
-        std::cout << "Can't server ruletable server" << std::endl;
+        std::cout << "Can't start ruletable server" << std::endl;
         return 1;
     }
 }

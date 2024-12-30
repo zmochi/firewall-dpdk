@@ -108,7 +108,7 @@ int init_sigint_handler() {
 #include "ruletable.hpp"
 
 pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
-                              direction pkt_direction, int log_write_fd) {
+                              direction pkt_direction, log_list &logger) {
     const rte_be16_t    ETHTYPE_IPV4 = htobe16(513);
     struct pkt_props    pkt_props;
     struct rte_tcp_hdr *tcp_hdr = {};
@@ -121,7 +121,7 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
      */
     struct rte_ether_hdr *eth_hdr =
         rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
-	size_t pktlen = rte_pktmbuf_pkt_len(&pkt);
+    size_t pktlen = rte_pktmbuf_pkt_len(&pkt);
     if ( eth_hdr->ether_type != ETHTYPE_IPV4 ) return PKT_DROP;
 
     struct rte_ipv4_hdr *ipv4_hdr =
@@ -156,13 +156,14 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
     }
 
     pkt_props.direction = pkt_direction;
-    write_log(pkt_props, dc, reason, log_write_fd);
+    logger.store_log(log_row_t(pkt_props, dc, reason));
 
     return dc;
 }
 
-int firewall_loop(struct ruletable &ruletable, int log_fd, uint16_t in_port,
-                  uint16_t out_port, uint16_t int_port, uint16_t ext_port) {
+int firewall_loop(struct ruletable &ruletable, log_list &logger,
+                  uint16_t in_port, uint16_t out_port, uint16_t int_port,
+                  uint16_t ext_port) {
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
      * recv_burst[]) using rte_eth_rx_burst()
@@ -191,7 +192,7 @@ int firewall_loop(struct ruletable &ruletable, int log_fd, uint16_t in_port,
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_in;
               recv_pkt_idx++ ) {
             if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
-                                        direction, log_fd) == PKT_PASS ) {
+                                        direction, logger) == PKT_PASS ) {
                 send_burst[nb_pkts_out_total++] = recv_burst[recv_pkt_idx];
             }
         }
@@ -217,7 +218,7 @@ int firewall_loop(struct ruletable &ruletable, int log_fd, uint16_t in_port,
  * an entire log_row_t
  */
 int start_firewall(int argc, char **argv, struct ruletable &ruletable,
-                   MAC_addr in_mac, MAC_addr out_mac, int log_fd) {
+                   MAC_addr in_mac, MAC_addr out_mac, log_list &logger) {
     int ret;
     /* internal and external NIC identifiers, initialized with invalid values
      * (assigned real ones later) */
@@ -262,10 +263,13 @@ int start_firewall(int argc, char **argv, struct ruletable &ruletable,
             continue;
         }
 
-        if ( memcmp(addr.addr_bytes, in_mac.addr_bytes, MAC_ADDR_LEN) == 0 )
+        if ( MAC_addr(addr.addr_bytes[0], addr.addr_bytes[1],
+                      addr.addr_bytes[2], addr.addr_bytes[3],
+                      addr.addr_bytes[4], addr.addr_bytes[5]) == out_mac )
             int_port = port;
-        else if ( memcmp(addr.addr_bytes, out_mac.addr_bytes, MAC_ADDR_LEN) ==
-                  0 )
+        else if ( MAC_addr(addr.addr_bytes[0], addr.addr_bytes[1],
+                           addr.addr_bytes[2], addr.addr_bytes[3],
+                           addr.addr_bytes[4], addr.addr_bytes[5]) == out_mac )
             ext_port = port;
         else
             continue;
@@ -287,13 +291,18 @@ int start_firewall(int argc, char **argv, struct ruletable &ruletable,
         goto cleanup;
     }
 
-    firewall_loop(ruletable, log_fd, int_port, ext_port);
-
-    // int ruletable_fd = shm_open(RULETABLE_SHM_KEY, O_RDONLY,
-    // RULETABLE_SHM_MODE); ruletable = mmap(NULL, RULETABLE_SIZE, PROT_READ,
-    // MAP_SHARED, ruletable_fd, 0);
+    if ( firewall_loop(ruletable, logger, int_port, ext_port, int_port,
+                       ext_port) < 0 ) {
+        ERROR("Couldn't execute firewall_loop()");
+        return -1;
+    }
 
     /* cleanup also handled in SIGINT handler */
 cleanup:
-    if ( rte_eal_cleanup() < 0 ) rte_exit(1, "error on releasing resources\n");
+    if ( rte_eal_cleanup() < 0 ) {
+        ERROR("error on releasing resources\n");
+        return -1;
+    }
+
+	return 0;
 }
