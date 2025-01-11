@@ -183,6 +183,7 @@ int fmt_rule(rule_entry rule, std::string &rule_txt) {
 
     /* must be ordered according to order of rules in rule string */
     rule_txt.append(static_cast<const char *>(rule.name.data()));
+	rule_txt.append(" ");
     convert_field(direction_converter, rule.direction);
     convert_field(saddr_converter, rule.saddr);
     convert_field(daddr_converter, rule.daddr);
