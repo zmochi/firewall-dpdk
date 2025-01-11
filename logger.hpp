@@ -3,19 +3,13 @@
 
 #include "endian.hpp"
 #include "packet.hpp"
-#include <cstring>
-#include <time.h>
+#include "ruletable.hpp"
+#include <cstring> /* for memcpy */
 #include <unordered_map>
 
 #define LOG_MQUEUE_NAME "/log_mqueue"
 
 typedef uint64_t count_t;
-
-typedef enum {
-    REASON_XMAS_PKT,
-    REASON_NO_RULE,
-    REASON_RULE,
-} reason_t;
 
 uint64_t get_timestamp_now();
 
@@ -28,14 +22,25 @@ struct log_row_t {
     be16_t   sport;
     be16_t   dport;
     reason_t reason;
-    count_t  count;
+    /* only relevant if reason is REASON_RULE */
+    size_t  reason_idx;
+    count_t count;
+
+    /* implement == to use this struct as key in hashamp */
+    bool operator==(const log_row_t &other) const {
+        return other.protocol == protocol && other.action == action &&
+               other.saddr == saddr && other.daddr == daddr &&
+               other.sport == sport && other.dport == dport &&
+               other.reason == reason;
+    }
 
     log_row_t() {}
 
-    log_row_t(pkt_props pkt, pkt_dc action, reason_t reason)
-        : timestamp(get_timestamp_now()), protocol(pkt.proto), action(action),
-          saddr(pkt.saddr), daddr(pkt.daddr), sport(pkt.sport),
-          dport(pkt.dport), reason(reason) {}
+    log_row_t(pkt_props pkt, decision_info dc)
+        : timestamp(get_timestamp_now()), protocol(pkt.proto),
+          action(dc.decision), saddr(pkt.saddr), daddr(pkt.daddr),
+          sport(pkt.sport), dport(pkt.dport), reason(dc.reason),
+          reason_idx(dc.rule_idx) {}
 
     log_row_t(proto protocol, pkt_dc action, be32_t saddr, be32_t daddr,
               be16_t sport, be16_t dport, reason_t reason)
@@ -59,7 +64,7 @@ struct hasher_log_row_t {
     (((uint64_t)row.dport << 48) | ((uint64_t)row.sport << 32) |               \
      ((uint64_t)row.saddr))
 
-    std::size_t operator()(const log_row_t &log_row) { /* do hashing */
+    std::size_t operator()(const log_row_t &log_row) const { /* do hashing */
         /* values of FNV_offset_basis, FNV_prime and algorithm taken from
          * https://en.wikipedia.org/wiki/Fowler–Noll–Vo_hash_function
          */
@@ -86,24 +91,16 @@ struct hasher_log_row_t {
 #define MB             (1 << 20)
 #define LOGS_INIT_SIZE 8 * MB
 
-int start_logger();
-
 struct log_list {
+    /* TODO: make this private and add access functions */
     std::unordered_map<log_row_t, log_row_t, hasher_log_row_t> log_hashmap;
+    std::mutex                                                 log_hashmap_lock;
 
     log_list() : log_hashmap() { log_hashmap.reserve(LOGS_INIT_SIZE); }
 
-	int start_logger();
+    int start_logger();
     int store_log(log_row_t log_row);
     int export_log();
 };
-
-/*
- * @brief log a packet from another process
- */
-int write_log(struct pkt_props pkt, pkt_dc action, reason_t reason,
-              int log_write_fd);
-
-int read_log(int log_read_fd, log_row_t& dst);
 
 #endif /* __LOGGER_H */

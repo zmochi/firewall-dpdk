@@ -22,7 +22,7 @@ void firewall_thread(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
 
 void ruletable_thread(ruletable &rt, const std::string &interface_file_path,
                       int interface_file_permissions) {
-    start_ruletable_interface(rt, interface_file_path, interface_file_permissions);
+    start_ruletable(rt, interface_file_path, interface_file_permissions);
 }
 
 void logger_thread(log_list &logger, const std::string &interface_file_path, int interface_file_permissions) {
@@ -38,7 +38,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* TODO: move tests to a normal location */
-    test_parse_mac_addr();
+	//test_parse_mac_addr();
     MAC_addr int_net_mac, ext_net_mac;
     if ( parse_mac_addr(argv[1], int_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing internal network mac address");

@@ -2,13 +2,10 @@
 #define __RULETABLE_H
 
 #include "endian.hpp"
-#include "logger.hpp" /* for reason_t */
 #include "packet.hpp"
 #include <array>
 #include <shared_mutex>
 #include <stdatomic.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <string>
 
 static constexpr auto RULE_NAME_MAXLEN = 20;
@@ -49,22 +46,29 @@ struct rule_entry {
 static constexpr auto MAX_NB_RULES = 500;
 static constexpr auto RULETABLE_SIZE = (MAX_NB_RULES * sizeof(rule_entry));
 
-typedef uint64_t table_entry;
-
 typedef enum {
     MATCH,
     NO_MATCH,
 } rule_match;
+
+typedef enum : int {
+    REASON_XMAS_PKT,
+    REASON_NO_RULE,
+    REASON_RULE,
+} reason_t;
 
 struct decision_info {
     int    rule_idx;
     pkt_dc decision;
     /* either REASON_NO_RULE or REASON_RULE */
     reason_t reason;
+
+	decision_info() {}
+	decision_info(int rule_idx, pkt_dc decision, reason_t reason) : rule_idx(rule_idx), decision(decision), reason(reason) {}
 };
 
 struct ruletable {
-    /* TODO: lock per rule_entry? */
+    /* TODO: lock per rule_entry in array? */
     /* reader-writer lock - lock.lock_shared() is reader lock, lock.lock() is
      * writer lock */
     std::shared_mutex                    ruletable_rwlock;
@@ -77,7 +81,7 @@ struct ruletable {
     decision_info query(const pkt_props *pkt, pkt_dc dft_dc);
 };
 
-int start_ruletable(ruletable &ruletable, const std::string interface_path,
-                    int interface_perms);
+int start_ruletable(struct ruletable &ruletable,
+                    const std::string interface_path, int interface_perms);
 
 #endif /* __RULETABLE_H */

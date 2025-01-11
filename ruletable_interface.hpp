@@ -4,8 +4,8 @@
 #include <cstdint>
 
 #define RULETABLE_INTERFACE_PATH "/dev/ruletable"
-static constexpr auto RULETABLE_INTERFACE_PIPE_PERMISSIONS = 0600;
-constexpr auto        RULETABLE_PATH_MAXLEN = 1 << 9; /* 512 */
+constexpr auto RULETABLE_PATH_MAXLEN = 1 << 9;
+constexpr auto RULETABLE_INTERFACE_PERMS = 0600;
 
 #define BIT(i) (1ULL << i)
 

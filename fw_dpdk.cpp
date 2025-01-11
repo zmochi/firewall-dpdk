@@ -1,3 +1,5 @@
+#include <cstring>
+#include <iostream>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_memory.h>
@@ -27,9 +29,16 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     uint16_t                nb_rx_dsc = MBUF_POOL_ELMS_PER_RING;
     uint16_t                nb_tx_dsc = MBUF_POOL_ELMS_PER_RING;
 
+    std::memset(&port_conf, 0, sizeof(port_conf));
+
     if ( !rte_eth_dev_is_valid_port(port) ) return -1;
 
     ret = rte_eth_dev_info_get(port, &dev_info);
+    if ( ret != 0 ) {
+        ERROR("Couldn't get device info for port %d: %s", port, strerror(-ret));
+        return -1;
+    }
+
     uint64_t dev_tx_capa = dev_info.tx_offload_capa;
     uint64_t dev_rx_capa = dev_info.rx_offload_capa;
     if ( !(dev_tx_capa & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM) ||
@@ -51,25 +60,36 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
         RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
     txconf = dev_info.default_txconf;
     rxconf = dev_info.default_rxconf;
-    port_conf.txmode.offloads |= offloads;
-    port_conf.rxmode.offloads |= offloads;
-    txconf.offloads |= offloads;
-    rxconf.offloads |= offloads;
+    // port_conf.txmode.offloads |= offloads;
+    // port_conf.rxmode.offloads |= offloads;
+    // txconf.offloads |= offloads;
+    // rxconf.offloads |= offloads;
 
     /* configure NIC
      * must adjust port settings on port_conf before this */
     ret = rte_eth_dev_configure(port, nb_rx_rings, nb_tx_rings, &port_conf);
+    if ( ret != 0 ) {
+        ERROR("Couldn't configure port %d", port);
+        return -1;
+    }
 
     /* if nb_rx/tx_dsc are above maximum number of rx/tx descriptors driver can
      * handle, this adjusts them to a valid value (rx/tx descriptors are slots
      * in the rx/tx rings that hold packets) */
     ret = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rx_dsc, &nb_tx_dsc);
+    if ( ret != 0 ) {
+        ERROR("Couldn't adjust rx/tx descriptors for port %d", port);
+        return -1;
+    }
 
     /* for each ring, set number of tx descriptors */
     for ( int i = 0; i < nb_tx_rings; i++ ) {
         ret = rte_eth_tx_queue_setup(port, i, nb_tx_dsc,
                                      rte_eth_dev_socket_id(port), &txconf);
-        if ( ret < 0 ) return -1;
+        if ( ret < 0 ) {
+            ERROR("Couldn't setup tx queue on port %d", port);
+            return -1;
+        }
     }
 
     /* for each ring, set number of rx descriptors */
@@ -77,7 +97,16 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
         ret = rte_eth_rx_queue_setup(port, i, nb_rx_dsc,
                                      rte_eth_dev_socket_id(port), &rxconf,
                                      mbuf_pool);
-        if ( ret < 0 ) return -1;
+        if ( ret < 0 ) {
+            ERROR("Couldn't setup rx queue on port %d", port);
+            return -1;
+        }
+    }
+
+    ret = rte_eth_dev_start(port);
+    if ( ret != 0 ) {
+        ERROR("Couldn't start port %d", port);
+        return -1;
     }
 
     return 0;
@@ -85,6 +114,7 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 
 void sigint_handler(int sig) {
     if ( rte_eal_cleanup() < 0 ) rte_exit(1, "error on releasing resources\n");
+    rte_exit(1, "Done\n");
 }
 
 int init_sigint_handler() {
@@ -141,29 +171,26 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
 
     pkt_props.proto = static_cast<proto>(ipv4_hdr->next_proto_id);
 
-    uint64_t XMAS_PKT_FLAGS = TCP_FIN_FLAG | TCP_URG_FLAG | TCP_PSH_FLAG;
-    pkt_dc   dc;
-    reason_t reason;
+    uint64_t      XMAS_PKT_FLAGS = TCP_FIN_FLAG | TCP_URG_FLAG | TCP_PSH_FLAG;
+    decision_info dc;
+    reason_t      reason;
 
     if ( (pkt_props.tcp_flags & XMAS_PKT_FLAGS) == XMAS_PKT_FLAGS ) {
-        dc = PKT_DROP;
-        reason = REASON_XMAS_PKT;
+        dc.decision = PKT_DROP;
+        dc.reason = REASON_XMAS_PKT;
     } else {
-        decision_info dc_info = ruletable.query(&pkt_props, PKT_DROP);
-        dc = dc_info.decision;
-        /* either REASON_NO_RULE or REASON_RULE */
-        reason = dc_info.reason;
+        dc = ruletable.query(&pkt_props, PKT_DROP);
     }
 
     pkt_props.direction = pkt_direction;
-    logger.store_log(log_row_t(pkt_props, dc, reason));
+    logger.store_log(log_row_t(pkt_props, dc));
 
-    return dc;
+    return dc.decision;
 }
 
 int firewall_loop(struct ruletable &ruletable, log_list &logger,
-                  uint16_t in_port, uint16_t out_port, uint16_t int_port,
-                  uint16_t ext_port) {
+                  uint16_t in_port, uint16_t out_port, direction direction) {
+    std::cout << "Started firewall loop" << std::endl;
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
      * recv_burst[]) using rte_eth_rx_burst()
@@ -173,33 +200,37 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
      */
     uint16_t nb_pkts_in = 0, nb_pkts_sent = 0, nb_pkts_out_total = 0;
     /* how many packets to receive at once from NIC in_port */
-    constexpr auto   RX_BURST_SIZE = 100;
+    constexpr auto   RX_BURST_SIZE = 10;
     struct rte_mbuf *recv_burst[RX_BURST_SIZE];
     struct rte_mbuf *send_burst[RX_BURST_SIZE];
-    direction        direction;
-    if ( in_port == int_port && out_port == ext_port ) {
-        direction = OUT;
-    } else if ( in_port == ext_port && out_port == in_port ) {
-        direction = IN;
-    } else {
-        ERROR("Bad port configuration");
-        return -1;
-    }
+
+    const char *direction_str = (direction == IN) ? "IN" : "OUT";
+
+    std::cout << "Firewall: Receiving on port " << in_port
+              << ", forwarding to " << out_port
+              << ". Direction: " << direction_str << std::endl;
 
     while ( true ) {
-        nb_pkts_in = rte_eth_rx_burst(out_port, 0, recv_burst, RX_BURST_SIZE);
+        nb_pkts_in = rte_eth_rx_burst(in_port, 0, recv_burst, RX_BURST_SIZE);
+        if ( nb_pkts_in > 0 ) {
+            std::cout << "Got " << nb_pkts_in << " packets" << std::endl;
+        }
 
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_in;
               recv_pkt_idx++ ) {
+            std::string pkt_str((char *)rte_pktmbuf_mtod(
+                recv_burst[recv_pkt_idx], struct rte_ether_hdr *));
             if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
                                         direction, logger) == PKT_PASS ) {
+				std::cout << "Added packet to send queue" << std::endl;
                 send_burst[nb_pkts_out_total++] = recv_burst[recv_pkt_idx];
             }
         }
 
         while ( nb_pkts_sent < nb_pkts_out_total ) {
-            nb_pkts_sent += rte_eth_tx_burst(
-                in_port, 0, send_burst + nb_pkts_sent, nb_pkts_sent);
+            nb_pkts_sent +=
+                rte_eth_tx_burst(out_port, 0, send_burst + nb_pkts_sent,
+                                 nb_pkts_out_total - nb_pkts_sent);
         }
 
         nb_pkts_out_total = nb_pkts_sent = 0;
@@ -217,8 +248,8 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
  * @param log_fd file descriptor for transmitting logs, each write to the fd is
  * an entire log_row_t
  */
-int start_firewall(int argc, char **argv, struct ruletable &ruletable,
-                   MAC_addr in_mac, MAC_addr out_mac, log_list &logger) {
+int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
+                   MAC_addr out_mac, log_list &logger) {
     int ret;
     /* internal and external NIC identifiers, initialized with invalid values
      * (assigned real ones later) */
@@ -247,7 +278,8 @@ int start_firewall(int argc, char **argv, struct ruletable &ruletable,
     argv += ret;
 
     mbuf_pool = rte_pktmbuf_pool_create(
-        "packet_pool", (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING,
+        "packet_pool",
+        (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING * 2,
         0 /* setting cache_size to 0 disables this feature */, 0, 1024,
         SOCKET_ID_ANY);
     if ( mbuf_pool == NULL ) {
@@ -263,20 +295,22 @@ int start_firewall(int argc, char **argv, struct ruletable &ruletable,
             continue;
         }
 
-        if ( MAC_addr(addr.addr_bytes[0], addr.addr_bytes[1],
-                      addr.addr_bytes[2], addr.addr_bytes[3],
-                      addr.addr_bytes[4], addr.addr_bytes[5]) == out_mac )
+        MAC_addr port_maddr = MAC_addr(addr.addr_bytes[0], addr.addr_bytes[1],
+                                       addr.addr_bytes[2], addr.addr_bytes[3],
+                                       addr.addr_bytes[4], addr.addr_bytes[5]);
+
+        std::cout << "Checking port with mac addr " << port_maddr.toStr()
+                  << std::endl;
+
+        if ( port_maddr == in_mac )
             int_port = port;
-        else if ( MAC_addr(addr.addr_bytes[0], addr.addr_bytes[1],
-                           addr.addr_bytes[2], addr.addr_bytes[3],
-                           addr.addr_bytes[4], addr.addr_bytes[5]) == out_mac )
+        else if ( port_maddr == out_mac )
             ext_port = port;
         else
             continue;
 
         if ( port_init(port, mbuf_pool) < 0 ) {
-            ERROR("Couldn't initialize port %u", port);
-            return -1;
+            rte_exit(1, "Couldn't initialize port %u\n", port);
         }
         printf("initialized port %u\n", port);
     }
@@ -291,10 +325,10 @@ int start_firewall(int argc, char **argv, struct ruletable &ruletable,
         goto cleanup;
     }
 
-    if ( firewall_loop(ruletable, logger, int_port, ext_port, int_port,
-                       ext_port) < 0 ) {
+    if ( firewall_loop(rt, logger, int_port, ext_port, OUT) <
+         0 ) {
         ERROR("Couldn't execute firewall_loop()");
-        return -1;
+        goto cleanup;
     }
 
     /* cleanup also handled in SIGINT handler */
@@ -304,5 +338,5 @@ cleanup:
         return -1;
     }
 
-	return 0;
+    return 0;
 }
