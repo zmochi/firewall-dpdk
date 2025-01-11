@@ -1,7 +1,7 @@
-#include "ruletable.hpp"
+#include "../ruletable.hpp"
 #include "ruletable_interface.hpp"
 #include "simple_ipc.hpp"
-#include "utils.h"
+#include "../utils.h"
 
 /* how many simultaneous clients can be waiting for server to accept their connection */
 static constexpr auto RULETABLE_INTERFACE_BACKLOG = 10;

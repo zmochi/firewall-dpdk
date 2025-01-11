@@ -1,7 +1,7 @@
-#include "parsers/ruletable_parser.hpp"
+#include "../parsers/ruletable_parser.hpp"
 
 #include "ruletable_client.hpp"
-#include "logger.hpp"
+#include "../logger.hpp"
 #include "logs_client.hpp"
 #include "logs_interface.hpp"
 #include "ruletable_interface.hpp"

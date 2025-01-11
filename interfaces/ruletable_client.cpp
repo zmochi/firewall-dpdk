@@ -1,10 +1,10 @@
-#include "ruletable_client.hpp"
+#include "../parsers/ruletable_parser.hpp"
 
-#include "parsers/ruletable_parser.hpp"
-#include "ruletable.hpp"
+#include "ruletable_client.hpp"
+#include "../ruletable.hpp"
+#include "../utils.h"
 #include "ruletable_interface.hpp"
 #include "simple_ipc.hpp"
-#include "utils.h"
 
 #include <cassert>
 #include <climits>

@@ -1,4 +1,4 @@
-#include "logger.hpp"
+#include "../logger.hpp"
 #include "logs_interface.hpp"
 #include "simple_ipc.hpp"
 

@@ -1,9 +1,11 @@
 #ifndef __LOGS_CLIENT_H
 #define __LOGS_CLIENT_H
 
-#include "logger.hpp"
+#include "../logger.hpp"
 #include "logs_interface.hpp"
 #include "simple_ipc.hpp"
+
+#include <vector>
 
 #define LOG_TXT_TITLE                                                          \
     "timestamp\t\tsrc_ip\t\tdst_ip\t\tsrc_port\t\tdst_"                        \
