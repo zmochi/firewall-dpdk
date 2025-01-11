@@ -14,6 +14,7 @@ fw_cdeps = \
 	ruletable.cpp \
 	logger.cpp \
 	macaddr.cpp \
+	interfaces/ruletable_server.cpp \
 
 fw_hdeps = \
 	interfaces/ruletable_interface.hpp \
@@ -27,6 +28,7 @@ fw_hdeps = \
 	endian.hpp \
 	logger.hpp \
 	ruletable.hpp \
+	interfaces/ruletable_server.hpp \
 
 interface_cdeps = \
 	interfaces/interface_main.cpp \
