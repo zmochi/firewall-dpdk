@@ -1,48 +1,22 @@
-#include <memory>
-
-#include "packet.hpp"
-#include "ruletable.hpp"
-#include "parsers/ruletable_parser.hpp"
 #include "ruletable_client.hpp"
-#include "simple_ipc.hpp"
+
+#include "parsers/ruletable_parser.hpp"
+#include "ruletable.hpp"
 #include "ruletable_interface.hpp"
+#include "simple_ipc.hpp"
 #include "utils.h"
 
 #include <cassert>
 #include <climits>
-#include <fstream>
-
-std::unique_ptr<ruletable>
-load_ruletable_from_file(const std::string &filepath) {
-    using namespace std;
-    unique_ptr<ruletable> rt = make_unique<ruletable>();
-
-    constexpr auto                 MAX_RULE_LINE_LEN = 1 << 9;
-    array<char, MAX_RULE_LINE_LEN> rule_line;
-
-    size_t   rule_line_len;
-    size_t   line_idx = 0;
-    ifstream ruletable_file(filepath, ios_base::in);
-    while ( ruletable_file.getline(&rule_line[0], rule_line.size()) ) {
-        rule_entry rule;
-        line_idx++;
-        if ( parse_rule(rule_line.data(), rule) < 0 ) {
-            ERROR("Couldn't parse rule at line %zu", line_idx);
-            return nullptr;
-        }
-        rt.get()->add_rule(rule);
-    }
-
-    return rt;
-}
 
 int load_ruletable(ruletable &rt, const std::string rt_interface_path) {
-	  /* ruletable_action is an enum containing actions the client can send to the
+    /* ruletable_action is an enum containing actions the client can send to the
      * server */
-    IPC_Client<ruletable_action> client(ruletable_send_path);
+    IPC_Client<ruletable_action> client(rt_interface_path);
 
     if ( client.send_action(LOAD_RULETABLE) < 0 ) {
         ERROR("Couldn't send client action to server");
+        return -1;
     }
 
     /* send number of rules in new ruletable */
@@ -68,9 +42,26 @@ int load_ruletable(ruletable &rt, const std::string rt_interface_path) {
     }
 
     return 0;
-
 }
 
 int show_ruletable(ruletable &rt, const std::string rt_interface_path) {
-}
+    IPC_Client<ruletable_action> client(rt_interface_path);
 
+    if ( client.send_action(SHOW_RULETABLE) < 0 ) {
+        ERROR("Couldn't send SHOW_RULETABLE action to server");
+        return -1;
+    }
+
+    if ( client.recv_size(&rt.nb_rules, sizeof(rt.nb_rules)) < 0 ) {
+        ERROR("Couldn't receive number of rules in ruletable from server");
+        return -1;
+    }
+
+    if ( client.recv_size(rt.rule_entry_arr.data(),
+                          sizeof(rt.rule_entry_arr[0]) * rt.nb_rules) < 0 ) {
+        ERROR("Couldn't receive ruletable data");
+        return -1;
+    }
+
+    return 0;
+}

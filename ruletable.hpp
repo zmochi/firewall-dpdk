@@ -3,6 +3,7 @@
 
 #include "endian.hpp"
 #include "packet.hpp"
+
 #include <array>
 #include <shared_mutex>
 #include <stdatomic.h>
@@ -78,6 +79,7 @@ struct ruletable {
     ruletable() : nb_rules(0) {}
     ruletable(std::array<rule_entry, MAX_NB_RULES> &rule_arr, size_t nb_rules);
     int           add_rule(rule_entry rule);
+	int replace(ruletable &new_rt);
     decision_info query(const pkt_props *pkt, pkt_dc dft_dc);
 };
 

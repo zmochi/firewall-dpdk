@@ -81,6 +81,7 @@ int IPC_Server<actionEnum>::start_server(void *user_arg) {
     size_t     msg_size;
     actionEnum action;
 
+
     while ( 1 ) {
         new_sockfd = accept(listen_sockfd, nullptr, nullptr);
         if ( new_sockfd < 0 ) {
@@ -205,11 +206,11 @@ ssize_t IPC_Client<actionEnum>::recv_size(void *dst, size_t cap) {
     return static_cast<ssize_t>(msg_size);
 }
 
-const std::string ruletable_path = "/dev/test_simple_ipc";
 enum simple_ipc_code {
     HELLO = 0x1,
 };
 static void simple_ipc_tests() {
+	const std::string ruletable_path = "/dev/test_simple_ipc";
     /* create file */
     close(open(ruletable_path.data(), O_CREAT, 0));
 

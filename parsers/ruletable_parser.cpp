@@ -1,7 +1,9 @@
-#include "endian.hpp"
-#include "packet.hpp"
-#include "ruletable.hpp"
-#include "utils.h"
+#include <memory>
+
+#include "../endian.hpp"
+#include "../packet.hpp"
+#include "../ruletable.hpp"
+#include "../utils.h"
 
 #include <cassert>
 #include <climits>
@@ -9,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <fstream>
 
 constexpr auto   RULE_FIELD_DELIM = ' ';
 constexpr auto   RULE_NB_FIELDS = 9;
@@ -194,8 +197,8 @@ int fmt_rule(rule_entry rule, std::string &rule_txt) {
     return 0;
 }
 
-static int parse_rule(const char *rule /* delimited by null byte */,
-                      rule_entry &rule_entry) {
+int parse_rule(const char *rule /* delimited by null byte */,
+               rule_entry &rule_entry) {
     /* array holding start and end index of each field in rule array, end index
      * points at the delimiting space character */
     std::vector<std::pair<int, int>> field_indices =
@@ -480,4 +483,28 @@ static int parse_rule_test() {
 
     std::cout << "Rule parse test successful" << std::endl;
     return 0;
+}
+
+std::unique_ptr<ruletable>
+load_ruletable_from_file(const std::string &filepath) {
+    using namespace std;
+    unique_ptr<ruletable> rt = make_unique<ruletable>();
+
+    constexpr auto                 MAX_RULE_LINE_LEN = 1 << 9;
+    array<char, MAX_RULE_LINE_LEN> rule_line;
+
+    size_t   rule_line_len;
+    size_t   line_idx = 0;
+    ifstream ruletable_file(filepath, ios_base::in);
+    while ( ruletable_file.getline(&rule_line[0], rule_line.size()) ) {
+        rule_entry rule;
+        line_idx++;
+        if ( parse_rule(rule_line.data(), rule) < 0 ) {
+            ERROR("Couldn't parse rule at line %zu", line_idx);
+            return nullptr;
+        }
+        rt.get()->add_rule(rule);
+    }
+
+    return rt;
 }

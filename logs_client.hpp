@@ -1,6 +1,7 @@
 #ifndef __LOGS_CLIENT_H
 #define __LOGS_CLIENT_H
 
+#include "logger.hpp"
 #include "logs_interface.hpp"
 #include "simple_ipc.hpp"
 

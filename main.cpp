@@ -1,5 +1,7 @@
 #include "firewall.hpp"
 #include "logger.hpp"
+#include "logs_interface.hpp"
+#include "ruletable_interface.hpp"
 #include "logs_server.hpp"
 #include "macaddr.hpp"
 #include "ruletable.hpp"
@@ -9,11 +11,6 @@
 #include <iostream>
 #include <thread>
 #include <unistd.h>
-
-const std::string RULETABLE_INTERFACE_PATH = "/home/fw/DPDK/rt_iface";
-const std::string LOG_INTERFACE_PATH = "/home/fw/DPDK/log_iface";
-constexpr auto    RULETABLE_INTERFACE_PERMS = 0600;
-constexpr auto    LOG_INTERFACE_PERMS = 0600;
 
 void firewall_thread(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
                      MAC_addr out_mac, log_list &logger) {

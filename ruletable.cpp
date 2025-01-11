@@ -1,122 +1,34 @@
 #include "ruletable.hpp"
-#include "simple_ipc.hpp"
 #include "utils.h"
-#include <mutex> /* for unique_lock */
 
 #include <cstdlib>
 #include <fcntl.h>
+#include <mutex> /* for unique_lock */
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "ruletable_interface.hpp"
-
-static constexpr auto RULETABLE_INTERFACE_BACKLOG = 10;
-
-int replace_ruletable(ruletable &rt, ruletable &new_rt) {
+int ruletable::replace(ruletable &new_rt) {
     if ( new_rt.nb_rules > MAX_NB_RULES ) return -1;
 
-    if ( rt.rule_entry_arr.size() < new_rt.nb_rules ) {
+    if ( rule_entry_arr.size() < new_rt.nb_rules ) {
         ERROR("Destination ruletable capacity too small, can't replace "
               "ruletable");
         return -1;
     }
 
-    rt.ruletable_rwlock.lock();
+    ruletable_rwlock.lock();
 
     for ( int i = 0; i < new_rt.nb_rules; i++ ) {
-        rt.rule_entry_arr.at(i) = rt.rule_entry_arr.at(i);
+        rule_entry_arr.at(i) = new_rt.rule_entry_arr.at(i);
     }
 
-    rt.nb_rules = new_rt.nb_rules;
+    nb_rules = new_rt.nb_rules;
 
-    rt.ruletable_rwlock.unlock();
-
-    return 0;
-}
-
-int ruletable_msg_callback(IPC_Server<ruletable_action> &server,
-                           ruletable_action action, size_t msg_size,
-                           int msg_sockfd, void *user_arg) {
-    ruletable       &ruletable = *static_cast<struct ruletable *>(user_arg);
-    char             new_ruletable_path[RULETABLE_PATH_MAXLEN];
-    struct ruletable new_rt;
-    size_t           new_nb_rules;
-    ruletable_action server_response;
-
-    switch ( action ) {
-        case LOAD_RULETABLE:
-            /* get RULETABLE_PATH_MAXLEN bytes, path padded with null bytes */
-            if ( server.recv_size(msg_sockfd, &new_nb_rules,
-                                  sizeof(new_nb_rules)) < 0 ) {
-                ERROR("Couldn't receive number of rules in new ruletable");
-                return -1;
-            }
-
-            /* rule_entry_arr is a static array, so its size is also its
-             * capacity */
-            if ( new_nb_rules > new_rt.rule_entry_arr.size() ) {
-                ERROR("Client sent ruletable with too many rules.");
-                server_response = BAD_MSG;
-                if ( server.send_size(msg_sockfd, &server_response,
-                                      sizeof(server_response)) < 0 ) {
-                    ERROR("Couldn't send BAD_MSG back to client");
-                    return -1;
-                }
-                break;
-            }
-
-            server_response = OK;
-            if ( server.send_size(msg_sockfd, &server_response,
-                                  sizeof(server_response)) < 0 ) {
-                ERROR("Couldn't send OK message to client after receiving "
-                      "number of rules");
-                return -1;
-            }
-
-            if ( server.recv_size(msg_sockfd, &new_rt.rule_entry_arr,
-                                  new_rt.rule_entry_arr.size() *
-                                      sizeof(new_rt.rule_entry_arr[0])) < 0 ) {
-                ERROR("Couldn't receive new ruletable, on ruletable interface "
-                      "socket");
-                return -1;
-            }
-
-            replace_ruletable(ruletable, new_rt);
-            break;
-
-        case SHOW_RULETABLE:
-            ruletable.ruletable_rwlock.lock_shared();
-
-            server.send_size(msg_sockfd, &ruletable.nb_rules,
-                             sizeof(ruletable.nb_rules));
-            server.send_size(msg_sockfd, &ruletable.rule_entry_arr,
-                             ruletable.nb_rules *
-                                 sizeof(ruletable.rule_entry_arr[0]));
-
-            ruletable.ruletable_rwlock.unlock();
-            break;
-
-        default:
-            printf("Unknown ruletable action\n");
-            return 0;
-    }
+    ruletable_rwlock.unlock();
 
     return 0;
-}
-
-int start_ruletable(struct ruletable &ruletable,
-                    const std::string interface_path, int interface_perms) {
-    /* named Unix socket, backed by file somewhere in the file system to
-     * handle show_rules and load_rules. this is a server object that listens on
-     * that socket. */
-    IPC_Server<ruletable_action> server(interface_path, interface_perms,
-                                        RULETABLE_INTERFACE_BACKLOG,
-                                        ruletable_msg_callback);
-
-    /* starts server that handles show_rules, load_rules */
-    return server.start_server(&ruletable);
 }
 
 int ruletable::add_rule(rule_entry rule) {
