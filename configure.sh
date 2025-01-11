@@ -2,10 +2,10 @@
 
 devbind="/home/fw/DPDK/dpdk-devbind.py"
 hugepages="/home/fw/DPDK/dpdk-hugepages.py"
-interfaces=("host1" "host2")
+interfaces=("int_host" "ext_host")
 
 if [[ "$(whoami)" != "root" ]]; then
-	echo "Must be root, use \'sudo -s\'"
+	echo "Must be root"
 	exit 1
 fi
 

@@ -3,7 +3,6 @@
 
 #include "endian.hpp"
 #include "packet.hpp"
-#include <array>
 #include <cstring>
 #include <time.h>
 #include <unordered_map>
@@ -17,7 +16,6 @@ typedef enum {
     REASON_NO_RULE,
     REASON_RULE,
 } reason_t;
-
 
 uint64_t get_timestamp_now();
 
@@ -41,10 +39,9 @@ struct log_row_t {
 
     log_row_t(proto protocol, pkt_dc action, be32_t saddr, be32_t daddr,
               be16_t sport, be16_t dport, reason_t reason)
-        : protocol(protocol), action(action), saddr(saddr), daddr(daddr),
-          sport(sport), dport(dport), reason(reason) {
-        this->timestamp = get_timestamp_now();
-    }
+        : timestamp(get_timestamp_now()), protocol(protocol), action(action),
+          saddr(saddr), daddr(daddr), sport(sport), dport(dport),
+          reason(reason) {}
     log_row_t(time_t timestamp, proto protocol, pkt_dc action, be32_t saddr,
               be32_t daddr, be16_t sport, be16_t dport, reason_t reason)
         : log_row_t(protocol, action, saddr, daddr, sport, dport, reason) {
@@ -55,7 +52,7 @@ struct log_row_t {
 struct hasher_log_row_t {
     /* callable struct that calculates hash of a log entry */
 
-    /* packs dest port, src port and src addr into 64 bits:
+    /* packs dest port, src port and src addr into 64 bits for hashing:
      * (16 bits dest port) (16 bits src port) (32 bits src addr)
      */
 #define ROW_HASH_DATA(row)                                                     \
@@ -94,25 +91,19 @@ int start_logger();
 struct log_list {
     std::unordered_map<log_row_t, log_row_t, hasher_log_row_t> log_hashmap;
 
-    log_list() : log_hashmap() {
-        log_hashmap.reserve(LOGS_INIT_SIZE);
-    }
+    log_list() : log_hashmap() { log_hashmap.reserve(LOGS_INIT_SIZE); }
 
-    /*
-     * @brief start receiving packet logs using the reading end of the pipe
-     * @param log_read_fd reading end of a pipe, to be called from the logger
-     * process
-     */
+	int start_logger();
     int store_log(log_row_t log_row);
     int export_log();
 };
 
 /*
- * @brief log a packet from another process using the writing end of the pipe
+ * @brief log a packet from another process
  */
 int write_log(struct pkt_props pkt, pkt_dc action, reason_t reason,
               int log_write_fd);
 
-log_row_t read_log(int log_read_fd);
+int read_log(int log_read_fd, log_row_t& dst);
 
 #endif /* __LOGGER_H */

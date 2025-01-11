@@ -1,79 +1,62 @@
 #include "firewall.hpp"
 #include "logger.hpp"
+#include "logs_server.hpp"
 #include "macaddr.hpp"
 #include "ruletable.hpp"
 #include "utils.h"
 
 #include <cstdlib>
-#include <new>
+#include <iostream>
+#include <thread>
 #include <unistd.h>
-#include <threads.h>
 
-/* shared memory: */
-#include <fcntl.h>
-#include <mqueue.h>
-#include <string>
-#include <sys/mman.h>
-#include <sys/stat.h>
+const std::string RULETABLE_INTERFACE_PATH = "/home/fw/DPDK/rt_iface";
+const std::string LOG_INTERFACE_PATH = "/home/fw/DPDK/log_iface";
+constexpr auto    RULETABLE_INTERFACE_PERMS = 0600;
+constexpr auto    LOG_INTERFACE_PERMS = 0600;
 
-struct firewall_thread_args {
-    int               dpdk_eal_argc;
-    char            **dpdk_eal_argv;
-    struct ruletable &ruletable;
-    MAC_addr          int_mac_addr, ext_mac_addr;
+void firewall_thread(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
+                     MAC_addr out_mac, log_list &logger) {
+    start_firewall(argc, argv, rt, in_mac, out_mac, logger);
+}
 
-	firewall_thread_args(int dpdk_eal_argc, char** dpdk_eal_argv, struct ruletable& ruletable, MAC_addr int_mac_addr, MAC_addr ext_mac_addr) : dpdk_eal_argc(dpdk_eal_argc), dpdk_eal_argv(dpdk_eal_argv), ruletable(ruletable), int_mac_addr(int_mac_addr), ext_mac_addr(ext_mac_addr) {}
-};
+void ruletable_thread(ruletable &rt, const std::string &interface_file_path,
+                      int interface_file_permissions) {
+    start_ruletable_interface(rt, interface_file_path, interface_file_permissions);
+}
 
-void *logger_thread(void *arg) {}
-
-void *firewall_thread(void *arg) {}
-
-void *ruletable_thread(void *arg) {}
+void logger_thread(log_list &logger, const std::string &interface_file_path, int interface_file_permissions) {
+    start_log_server(logger, interface_file_path, interface_file_permissions);
+}
 
 int main(int argc, char *argv[]) {
-    if ( argc != 2 ) {
-        PRINT_USAGE();
+    if ( argc != 3 ) {
+        std::cout << "Usage: " << argv[0]
+                  << " <internal NIC MAC address> <external NIC MAC address>"
+                  << std::endl;
+		return 1;
     }
 
     /* TODO: move tests to a normal location */
     test_parse_mac_addr();
-    std::string int_mac = std::string(argv[0]), ext_mac = std::string(argv[1]);
-    MAC_addr    int_net_mac, ext_net_mac;
-    if ( parse_mac_addr(int_mac, int_net_mac) < 0 ) {
+    MAC_addr int_net_mac, ext_net_mac;
+    if ( parse_mac_addr(argv[1], int_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing internal network mac address");
     }
-    if ( parse_mac_addr(ext_mac, ext_net_mac) < 0 ) {
+    if ( parse_mac_addr(argv[2], ext_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing external network mac address");
     }
 
-    ruletable *ruletable = new struct ruletable;
-    if ( ruletable == nullptr ) {
-        ERROR_EXIT("Error creating ruletable memory");
-    }
+    log_list  *logger = new struct log_list;
+    ruletable *rt = new struct ruletable;
 
-    int logger_pid = fork();
-    if ( logger_pid == 0 ) {
-        /* second process handles logs */
-        start_logger();
-    } else if ( logger_pid < 0 ) {
-        /* err on fork */
-        ERROR_EXIT("Logger fork failed");
-    }
+    std::thread log_thread(logger_thread, std::ref(*logger), LOG_INTERFACE_PATH, LOG_INTERFACE_PERMS);
+    std::thread rt_thread(ruletable_thread, std::ref(*rt), RULETABLE_INTERFACE_PATH,
+                          RULETABLE_INTERFACE_PERMS);
+    std::thread fw_thread(firewall_thread, argc - 2, argv, std::ref(*rt), int_net_mac,
+                          ext_net_mac, std::ref(*logger));
 
-    int fw_pid = fork();
-    if ( fw_pid == 0 ) {
-        /* third process, firewall process */
-		firewall_thread_args args(0, nullptr, *ruletable, int_net_mac, ext_net_mac);
-        if ( start_firewall(0, NULL, ruletable, int_net_mac, ext_net_mac) <
-             0 ) {
-            ERROR_EXIT("Couldn't start firewall");
-        }
-    } else if ( fw_pid < 0 ) {
-        /* error in fork */
-        ERROR_EXIT("Firewall fork failed");
-    }
-
-    /* main process handles ruletable */
-    start_ruletable();
+    log_thread.join();
+    rt_thread.join();
+    fw_thread.join();
 }

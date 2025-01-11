@@ -2,10 +2,10 @@
 #include "packet.hpp"
 #include "utils.h"
 #include <cassert>
+#include <chrono>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <chrono>
 
 #define LOGS_PER_NODE 64
 
@@ -14,7 +14,7 @@ uint64_t get_timestamp_now() {
     auto now = system_clock::now();
 
     static_assert(sizeof(milliseconds) == sizeof(uint64_t),
-                  "Miliseconds have unexpected type");
+                  "Miliseconds have unexpected size");
     return duration_cast<milliseconds>(now.time_since_epoch()).count();
 }
 
@@ -23,41 +23,44 @@ int log_list::store_log(log_row_t log_row) {
     if ( item != log_hashmap.end() )
         item->second.count++;
     else {
-        if ( log_row.timestamp != 0 )
+        if ( log_row.timestamp != 0 ) {
             ERROR("log timestamp must be initialized before storing");
+            return -1;
+        }
         log_row.count = 0;
         log_hashmap.emplace(log_row);
     }
+
+    return 0;
 }
 
 #include <mqueue.h>
 
-int start_logger() {
+int log_list::start_logger() {
     static constexpr auto LOG_MAX_MQ_MSGS = (1 << 14);
-    static constexpr auto LOG_PERMISSIONS = 600;
+    static constexpr auto LOG_PERMISSIONS = 0600;
     mq_attr               mqueue_attributes = {.mq_maxmsg = LOG_MAX_MQ_MSGS,
                                                .mq_msgsize = sizeof(log_row_t)};
-    mqd_t                 mqueue =
-        mq_open(LOG_MQUEUE_NAME,
-                O_CREAT | O_RDWR |
-                    O_EXCL /* return error if this mqueue already exists */,
-                LOG_PERMISSIONS, &mqueue_attributes);
+
+    /* O_EXCL: return error if this mqueue already exists */
+    mqd_t mqueue = mq_open(LOG_MQUEUE_NAME, O_CREAT | O_RDWR | O_EXCL,
+                           LOG_PERMISSIONS, &mqueue_attributes);
     if ( mqueue < 0 ) {
         ERROR("Error creating POSIX message queue");
         exit(1);
     }
 
-    log_list  logger = log_list();
     log_row_t pkt_log;
 
     while ( 1 ) {
         /* this call blocks if there's nothing to read */
-        pkt_log = read_log(mqueue);
-        logger.store_log(pkt_log);
+        if( read_log(mqueue, pkt_log) < 0) {
+			ERROR("read_log failed");
+			return -1;
+		}
+        store_log(pkt_log);
     }
 }
-
-#include <mqueue.h>
 
 int write_log(struct pkt_props pkt, pkt_dc action, reason_t reason,
               int log_write_fd) {
