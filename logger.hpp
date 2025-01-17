@@ -14,17 +14,17 @@ typedef uint64_t count_t;
 uint64_t get_timestamp_now();
 
 struct log_row_t {
-    time_t   timestamp;
-    proto    protocol;
-    pkt_dc   action;
+    time_t   timestamp = 0;
+    proto    protocol = NUL_PROTO;
+    pkt_dc   action = PKT_ERR;
     be32_t   saddr;
     be32_t   daddr;
     be16_t   sport;
     be16_t   dport;
     reason_t reason;
     /* only relevant if reason is REASON_RULE */
-    size_t  reason_idx;
-    count_t count;
+    size_t  reason_idx = -1;
+    count_t count = 0;
 
     /* implement == to use this struct as key in hashamp */
     bool operator==(const log_row_t &other) const {

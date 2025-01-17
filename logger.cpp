@@ -20,7 +20,7 @@ int log_list::store_log(log_row_t log_row) {
     if ( item != log_hashmap.end() )
         item->second.count++;
     else {
-        if ( log_row.timestamp != 0 ) {
+        if ( log_row.timestamp == 0 ) {
             ERROR("log timestamp must be initialized before storing");
             return -1;
         }

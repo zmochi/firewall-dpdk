@@ -1,6 +1,7 @@
 #include "../logger.hpp"
 #include "logs_interface.hpp"
 #include "simple_ipc.hpp"
+#include <cassert>
 
 int log_server_cb(IPC_Server<log_actions> &server, log_actions action,
                   size_t msg_size, int sockfd, void *logger_arg) {
@@ -15,11 +16,6 @@ int log_server_cb(IPC_Server<log_actions> &server, log_actions action,
             logger.log_hashmap_lock.lock();
 
             num_logs = logger.log_hashmap.size();
-            logs_arr = new log_row_t[num_logs];
-            i = 0;
-            for ( auto log_row : logger.log_hashmap ) {
-                logs_arr[i++] = log_row.second;
-            }
 
             server.send_size(sockfd, &num_logs, sizeof(num_logs));
 
@@ -28,6 +24,14 @@ int log_server_cb(IPC_Server<log_actions> &server, log_actions action,
                 ERROR("Client couldn't receive %zu logs", num_logs);
                 return 0;
             }
+
+            logs_arr = new log_row_t[num_logs];
+            i = 0;
+            for ( auto log_row : logger.log_hashmap ) {
+                logs_arr[i++] = log_row.second;
+            }
+
+			assert(i == num_logs);
 
             server.send_size(sockfd, logs_arr, num_logs * sizeof(logs_arr[0]));
 

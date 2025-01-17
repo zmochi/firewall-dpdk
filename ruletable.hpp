@@ -56,6 +56,7 @@ typedef enum : int {
     REASON_XMAS_PKT,
     REASON_NO_RULE,
     REASON_RULE,
+	REASON_NONIPV4,
 } reason_t;
 
 struct decision_info {

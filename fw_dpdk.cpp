@@ -95,7 +95,7 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     /* for each ring, set number of rx descriptors */
     for ( int i = 0; i < nb_rx_rings; i++ ) {
         ret = rte_eth_rx_queue_setup(port, i, nb_rx_dsc,
-                                     rte_eth_dev_socket_id(port), &rxconf,
+                                     rte_eth_dev_socket_id(port), nullptr,
                                      mbuf_pool);
         if ( ret < 0 ) {
             ERROR("Couldn't setup rx queue on port %d", port);
@@ -106,6 +106,13 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     ret = rte_eth_dev_start(port);
     if ( ret != 0 ) {
         ERROR("Couldn't start port %d", port);
+        return -1;
+    }
+
+    /* enable promiscuous mode so packet forwarding works correctly */
+    ret = rte_eth_promiscuous_enable(port);
+    if ( ret != 0 ) {
+        ERROR("Couldn't set port %d in promiscuous mode", port);
         return -1;
     }
 
@@ -139,10 +146,8 @@ int init_sigint_handler() {
 
 pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
                               direction pkt_direction, log_list &logger) {
-    const rte_be16_t    ETHTYPE_IPV4 = htobe16(513);
     struct pkt_props    pkt_props;
     struct rte_tcp_hdr *tcp_hdr = {};
-    // const unsigned char IPPROTO_TCP = 6;
 
     /* struct rte_mbuf of the packet is stored right behind it in memory.
      * rte_pktmbuf_mtod() returns a pointer to the data (the packet itself)
@@ -151,45 +156,88 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
      */
     struct rte_ether_hdr *eth_hdr =
         rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
-    size_t pktlen = rte_pktmbuf_pkt_len(&pkt);
-    if ( eth_hdr->ether_type != ETHTYPE_IPV4 ) return PKT_DROP;
+    size_t           eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
+    constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
+                     ipv4hdr_size = sizeof(struct rte_ipv4_hdr),
+                     ipv6hdr_size = sizeof(struct rte_ipv6_hdr),
+                     tcphdr_size = sizeof(struct rte_tcp_hdr),
+                     udphdr_size = sizeof(struct rte_udp_hdr),
+                     icmphdr_size = sizeof(struct rte_icmp_hdr);
 
-    struct rte_ipv4_hdr *ipv4_hdr =
-        (struct rte_ipv4_hdr *)((char *)eth_hdr + sizeof(struct rte_ether_hdr));
+	if(eff_pktlen < ethhdr_size) {
+		ERROR("Packet too small to contain ethernet header");
+		return PKT_DROP;
+	}
 
-    /* store in network order */
-    pkt_props.saddr = ipv4_hdr->src_addr;
-    pkt_props.daddr = ipv4_hdr->dst_addr;
+    pkt_props.eth_proto = static_cast<eth_proto>(eth_hdr->ether_type);
+	
+	eff_pktlen -= ethhdr_size;
 
-    if ( ipv4_hdr->next_proto_id == IPPROTO_TCP ) {
-        tcp_hdr = (struct rte_tcp_hdr *)((char *)ipv4_hdr +
-                                         sizeof(struct rte_ipv4_hdr));
-        pkt_props.sport = tcp_hdr->src_port;
-        pkt_props.dport = tcp_hdr->dst_port;
-        pkt_props.tcp_flags = static_cast<enum tcp_flags>(tcp_hdr->tcp_flags);
-    }
+    if ( pkt_props.eth_proto == ETHTYPE_IPV4 && eff_pktlen > ipv4hdr_size ) {
+        struct rte_ipv4_hdr *ipv4_hdr =
+            (struct rte_ipv4_hdr *)((char *)eth_hdr + ethhdr_size);
+        pkt_props.proto = static_cast<proto>(ipv4_hdr->next_proto_id);
 
-    pkt_props.proto = static_cast<proto>(ipv4_hdr->next_proto_id);
+        /* store in network order */
+        pkt_props.saddr = ipv4_hdr->src_addr;
+        pkt_props.daddr = ipv4_hdr->dst_addr;
 
-    uint64_t      XMAS_PKT_FLAGS = TCP_FIN_FLAG | TCP_URG_FLAG | TCP_PSH_FLAG;
-    decision_info dc;
-    reason_t      reason;
+		eff_pktlen -= ipv4hdr_size;
 
-    if ( (pkt_props.tcp_flags & XMAS_PKT_FLAGS) == XMAS_PKT_FLAGS ) {
-        dc.decision = PKT_DROP;
-        dc.reason = REASON_XMAS_PKT;
-    } else {
-        dc = ruletable.query(&pkt_props, PKT_DROP);
+        if ( ipv4_hdr->next_proto_id == IPPROTO_TCP && eff_pktlen > tcphdr_size) {
+            tcp_hdr = (struct rte_tcp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
+            pkt_props.sport = tcp_hdr->src_port;
+            pkt_props.dport = tcp_hdr->dst_port;
+            pkt_props.tcp_flags =
+                static_cast<enum tcp_flags>(tcp_hdr->tcp_flags);
+        } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP && eff_pktlen > udphdr_size) {
+            struct rte_udp_hdr *udp_hdr =
+                (struct rte_udp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
+            pkt_props.sport = udp_hdr->src_port;
+            pkt_props.dport = udp_hdr->dst_port;
+        }
     }
 
     pkt_props.direction = pkt_direction;
-    logger.store_log(log_row_t(pkt_props, dc));
+
+    decision_info dc;
+    reason_t      reason;
+
+    /* decisions done here ONLY */
+    dc = ruletable.query(&pkt_props, PKT_DROP);
+
+    std::cout << "Decided to "
+              << ((dc.decision == PKT_DROP) ? "DROP" : "ACCEPT") << std::endl;
+
+    if ( dc.reason != REASON_NONIPV4 )
+        logger.store_log(log_row_t(pkt_props, dc));
 
     return dc.decision;
 }
 
+/* @brief switches the source MAC address in pkt to the MAC address of port
+ * @param pkt pointer to packet (rte_mbuf) whose src MAC address to switch
+ * @param port identifier of port that has the new mac address
+ */
+int switch_src_maddr(struct rte_mbuf *pkt, uint16_t port) {
+    if ( rte_pktmbuf_pkt_len(pkt) < sizeof(struct rte_ether_hdr) ) {
+        ERROR(
+            "Packet too short, not enough space to contain an ethernet header");
+        return -1;
+    }
+
+    struct rte_ether_hdr *pkt_ethhdr =
+        rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+    struct rte_ether_addr new_mac;
+    rte_eth_macaddr_get(port, &new_mac);
+
+    rte_ether_addr_copy(&new_mac, &pkt_ethhdr->src_addr);
+
+    return 0;
+}
+
 int firewall_loop(struct ruletable &ruletable, log_list &logger,
-                  uint16_t in_port, uint16_t out_port, direction direction) {
+                  uint16_t in_port, uint16_t out_port) {
     std::cout << "Started firewall loop" << std::endl;
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
@@ -198,42 +246,68 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
      * send_burst[].
      * 3. send all packets from send_burst[] with rte_eth_tx_burst()
      */
-    uint16_t nb_pkts_in = 0, nb_pkts_sent = 0, nb_pkts_out_total = 0;
-    /* how many packets to receive at once from NIC in_port */
+    uint16_t nb_pkts_rx = 0, nb_pkts_tx = 0, nb_pkts_tx_total = 0;
+    /* how many packets to receive/transmit at once from NIC */
     constexpr auto   RX_BURST_SIZE = 10;
     struct rte_mbuf *recv_burst[RX_BURST_SIZE];
     struct rte_mbuf *send_burst[RX_BURST_SIZE];
 
-    const char *direction_str = (direction == IN) ? "IN" : "OUT";
+    int       rx_port = in_port, tx_port = out_port;
+    direction direction = OUT;
+    int       mask = 0xFFFF;
+    int       cnt = 0;
 
-    std::cout << "Firewall: Receiving on port " << in_port
-              << ", forwarding to " << out_port
-              << ". Direction: " << direction_str << std::endl;
-
+    std::cout << "in_port = " << in_port << " out_port = " << out_port
+              << std::endl;
     while ( true ) {
-        nb_pkts_in = rte_eth_rx_burst(in_port, 0, recv_burst, RX_BURST_SIZE);
-        if ( nb_pkts_in > 0 ) {
-            std::cout << "Got " << nb_pkts_in << " packets" << std::endl;
+        /* switches between in_port and out_port, forwarding packets in both
+         * directions in alternating order */
+        rx_port ^= (in_port ^ out_port);
+        tx_port ^= (in_port ^ out_port);
+        direction = static_cast<enum direction>(direction ^ (OUT ^ IN));
+
+        if ( (cnt++ & mask) == mask || (cnt & mask) == mask )
+            std::cout << "Forwarding ports " << rx_port << " -> " << tx_port
+                      << ", direction: " << ((direction == IN) ? "IN" : "OUT")
+                      << std::endl;
+
+        nb_pkts_rx = rte_eth_rx_burst(rx_port, 0, recv_burst, RX_BURST_SIZE);
+
+        if ( nb_pkts_rx > 0 ) {
+            std::cout << "Got " << nb_pkts_rx << " packets" << std::endl;
         }
 
-        for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_in;
+        if ( rx_port == out_port && (cnt & mask) == 0xFFF )
+            std::cout << "OUT_PORT: received " << nb_pkts_rx << " packets"
+                      << std::endl;
+
+        nb_pkts_tx_total = 0;
+        for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
               recv_pkt_idx++ ) {
-            std::string pkt_str((char *)rte_pktmbuf_mtod(
-                recv_burst[recv_pkt_idx], struct rte_ether_hdr *));
             if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
                                         direction, logger) == PKT_PASS ) {
-				std::cout << "Added packet to send queue" << std::endl;
-                send_burst[nb_pkts_out_total++] = recv_burst[recv_pkt_idx];
+                std::cout << "Added packet to send queue, direction: "
+                          << ((direction == IN) ? "IN" : "OUT") << std::endl;
+                struct rte_mbuf *pkt = recv_burst[recv_pkt_idx];
+                send_burst[nb_pkts_tx_total++] = pkt;
             }
         }
 
-        while ( nb_pkts_sent < nb_pkts_out_total ) {
-            nb_pkts_sent +=
-                rte_eth_tx_burst(out_port, 0, send_burst + nb_pkts_sent,
-                                 nb_pkts_out_total - nb_pkts_sent);
+        /* rte_eth_tx_burst() is responsible for freeing sent packets */
+        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, send_burst, nb_pkts_tx_total);
+
+        if ( nb_pkts_tx > 0 ) {
+            std::cout << "Sent " << nb_pkts_tx << " packets, port " << rx_port
+                      << " -> port " << tx_port << std::endl;
         }
 
-        nb_pkts_out_total = nb_pkts_sent = 0;
+        /* free unsent packets. if rte_eth_tx_burst() was unable to transmit all
+         * packets, the tx queue is full. drop remaining packets to not hold up
+         * the execution */
+        for ( int i = nb_pkts_tx; i < nb_pkts_tx_total; i++ ) {
+            std::cout << "Freeing unsent packet " << i << std::endl;
+            rte_pktmbuf_free(send_burst[i]);
+        }
     }
 }
 
@@ -270,7 +344,9 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
      * there should be a switch() on rte_errno if error occurs
      */
     if ( (ret = rte_eal_init(argc, argv)) < 0 )
-        rte_exit(EXIT_FAILURE, "error on initializing EAL\n");
+        rte_exit(
+            EXIT_FAILURE,
+            "error on initializing EAL. have you run `sudo ./configure.sh`?\n");
 
     /* rte_eal_init may modify `ret` elements of argv, modify argc and argv to
      * match valid array elements */
@@ -299,9 +375,6 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
                                        addr.addr_bytes[2], addr.addr_bytes[3],
                                        addr.addr_bytes[4], addr.addr_bytes[5]);
 
-        std::cout << "Checking port with mac addr " << port_maddr.toStr()
-                  << std::endl;
-
         if ( port_maddr == in_mac )
             int_port = port;
         else if ( port_maddr == out_mac )
@@ -312,7 +385,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         if ( port_init(port, mbuf_pool) < 0 ) {
             rte_exit(1, "Couldn't initialize port %u\n", port);
         }
-        printf("initialized port %u\n", port);
+        printf("Initialized port %u\n", port);
     }
 
     if ( int_port == 0xFFFF ) {
@@ -325,8 +398,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         goto cleanup;
     }
 
-    if ( firewall_loop(rt, logger, int_port, ext_port, OUT) <
-         0 ) {
+    if ( firewall_loop(rt, logger, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
         goto cleanup;
     }
@@ -337,6 +409,5 @@ cleanup:
         ERROR("error on releasing resources\n");
         return -1;
     }
-
     return 0;
 }

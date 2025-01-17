@@ -8,10 +8,10 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
-#include <fstream>
 
 constexpr auto   RULE_FIELD_DELIM = ' ';
 constexpr auto   RULE_NB_FIELDS = 9;
@@ -153,6 +153,40 @@ static int parse_port(const std::string &port_str, be16_t *port_dest,
     return 0;
 }
 
+std::string fmt_ipaddr(be32_t ipaddr, uint32_t ipaddr_mask, bool add_mask) {
+    const std::string DELIM = ".";
+    std::string       ip_str;
+    uint8_t          *ip_bytes = reinterpret_cast<uint8_t *>(&ipaddr);
+
+    for ( int i = 0; i < 4; i++ ) {
+        ip_str.append(std::to_string(ip_bytes[i]));
+        ip_str.append(DELIM);
+    }
+    /* remove trailing delim */
+    ip_str.pop_back();
+
+	if(!add_mask) return ip_str;
+
+    /* determine mask size based on ipaddr_mask, assuming mask is some sequence
+     * of 1's followed by 0's only */
+    int ipaddr_mask_val = -1;
+    for ( int i = 0; i <= sizeof(ipaddr_mask) * CHAR_BIT; i++ ) {
+        if ( (ipaddr_mask << i) == 0 || i == 32) {
+            ipaddr_mask_val = i;
+            break;
+        }
+    }
+
+	if(ipaddr_mask_val == -1) {
+		ERROR("Couldn't determine mask of ipaddr %s", ip_str.data());
+	}
+
+    ip_str.append("/");
+    ip_str.append(std::to_string(ipaddr_mask_val));
+
+    return ip_str;
+}
+
 using field_pairings_t = std::initializer_list<std::pair<const char *, int>>;
 
 static constexpr int    ANY = 0x1;
@@ -170,26 +204,65 @@ static field_pairings_t action_converter = {{"accept", PKT_PASS},
                                             {"drop", PKT_DROP}};
 
 int fmt_rule(rule_entry rule, std::string &rule_txt) {
-    rule_txt.clear();
+    // rule_txt.clear();
+    const auto DELIM = " ";
     /* all rules have value widths < int, so `entry` is of type int */
-    auto convert_field = [&rule_txt](field_pairings_t field_values, int entry) {
+    auto convert_field = [&rule_txt, DELIM](field_pairings_t field_values,
+                                            int              entry) {
         for ( auto pair : field_values ) {
             if ( pair.second == entry ) {
                 rule_txt.append(pair.first);
-                rule_txt.append(" ");
+                rule_txt.append(DELIM);
+				return;
             }
+        }
+    };
+
+    auto append_ipaddr = [&rule_txt, convert_field, DELIM](be32_t ipaddr,
+                                                           be32_t ipaddr_mask) {
+        if ( ipaddr_mask == IPADDR_ANY_MASK )
+            convert_field(saddr_converter, ANY);
+        else {
+            rule_txt.append(fmt_ipaddr(ipaddr, ipaddr_mask, true));
+            rule_txt.append(DELIM);
+        }
+    };
+
+    auto append_port = [&rule_txt, convert_field, DELIM](be16_t port,
+                                                         be16_t port_mask) {
+        std::string port_str = std::to_string(port);
+        switch ( port_mask ) {
+            case PORT_ANY:
+                convert_field(sport_converter, ANY);
+                break;
+            case PORT_LT:
+                rule_txt.append("<");
+                rule_txt.append(port_str);
+                rule_txt.append(DELIM);
+                break;
+            case PORT_GT:
+                rule_txt.append(">");
+                rule_txt.append(port_str);
+                rule_txt.append(DELIM);
+                break;
+            case PORT_EQ:
+                rule_txt.append(port_str);
+                rule_txt.append(DELIM);
+                break;
+            default:
+                ERROR("Unknown value for port_mask");
         }
     };
 
     /* must be ordered according to order of rules in rule string */
     rule_txt.append(static_cast<const char *>(rule.name.data()));
-	rule_txt.append(" ");
+    rule_txt.append(DELIM);
     convert_field(direction_converter, rule.direction);
-    convert_field(saddr_converter, rule.saddr);
-    convert_field(daddr_converter, rule.daddr);
+    append_ipaddr(rule.saddr, rule.saddr_mask);
+    append_ipaddr(rule.daddr, rule.daddr_mask);
     convert_field(proto_converter, rule.proto);
-    convert_field(sport_converter, rule.sport);
-    convert_field(dport_converter, rule.dport);
+    append_port(rule.sport, rule.sport_mask);
+    append_port(rule.dport, rule.dport_mask);
     convert_field(ack_converter, rule.ack);
     convert_field(action_converter, rule.action);
     /* replace last ' ' with a newline */

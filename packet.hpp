@@ -6,28 +6,35 @@
 
 #include "endian.hpp"
 
-typedef enum : uint8_t {
+enum proto : uint8_t {
     TCP = IPPROTO_TCP,
     UDP = IPPROTO_UDP,
     ICMP = IPPROTO_ICMP,
     PROTO_ANY = 0x02,
     NUL_PROTO = 0xFF,
-} proto;
+};
 
-typedef enum : uint8_t {
+static_assert(__BYTE_ORDER == __LITTLE_ENDIAN);
+enum eth_proto : be16_t {
+    ETHTYPE_IPV4 = 0x0008, /* 0x0800 in big endian */
+    ETHTYPE_IPV6 = 0x0608, /* 0x0806 in big endian */
+    ETHTYPE_ARP = 0xDD86,  /* 0x86DD in big endian */
+};
+
+enum direction : uint8_t {
     IN = 0x01,
     OUT = 0x02,
     UNSPEC = 0x04,
     NUL_DIRECTION = 0x08,
-} direction;
+};
 
-typedef enum {
+enum pkt_dc {
     PKT_PASS = 0x01,
     PKT_DROP = 0x02,
     PKT_ERR = 0x04,
-} pkt_dc;
+};
 
-enum tcp_flags : uint64_t {
+enum tcp_flags : uint8_t {
     /* copied from DPDK's rte_tcp.h */
     TCP_CWR_FLAG = 0x80, /**< Congestion Window Reduced */
     TCP_ECE_FLAG = 0x40, /**< ECN-Echo */
@@ -41,13 +48,14 @@ enum tcp_flags : uint64_t {
 };
 
 struct pkt_props {
-    direction      direction;
-    uint32_t       saddr;
-    uint32_t       daddr;
-    proto          proto;
-    uint16_t       sport;
-    uint16_t       dport;
-    enum tcp_flags tcp_flags;
+    direction direction;
+    be32_t  saddr;
+    be32_t  daddr;
+    proto     proto;
+    eth_proto eth_proto;
+    be16_t  sport;
+    be16_t  dport;
+    tcp_flags tcp_flags;
 
     pkt_props()
         : tcp_flags(TCP_NUL_FLAG), direction(NUL_DIRECTION), proto(NUL_PROTO) {}

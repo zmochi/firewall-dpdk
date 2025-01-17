@@ -40,8 +40,11 @@ int ruletable::add_rule(rule_entry rule) {
 }
 
 bool cmp_direction(direction rule_direction, direction pkt_direction) {
-    if ( rule_direction == NUL_DIRECTION || pkt_direction == NUL_DIRECTION )
+	/* NUL_DIRECTION indicates error */
+    if ( rule_direction == NUL_DIRECTION || pkt_direction == NUL_DIRECTION ) {
+		ERROR("One of rule_direction or pkt_direction have invalid value");
         return false;
+	}
     if ( rule_direction == UNSPEC ) return true;
 
     return rule_direction == pkt_direction;
@@ -86,12 +89,27 @@ bool cmp_proto(proto rule_proto, proto pkt_proto) {
     return rule_proto == pkt_proto;
 }
 
+#include <iostream>
+
 decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
     using namespace std;
     /* what to do with packet that has no matching rule */
     const pkt_dc  NO_MATCHING_RULE_DC = dft_dc;
+    uint64_t      XMAS_PKT_FLAGS = TCP_FIN_FLAG | TCP_URG_FLAG | TCP_PSH_FLAG;
     unsigned int  rule_idx;
     decision_info dc_info = {};
+
+    if ( pkt->eth_proto != ETHTYPE_IPV4 ) {
+        dc_info.decision = PKT_PASS;
+		dc_info.reason = REASON_NONIPV4;
+        return dc_info;
+    }
+
+    if ( (pkt->tcp_flags & XMAS_PKT_FLAGS) == XMAS_PKT_FLAGS ) {
+        dc_info.decision = PKT_DROP;
+        dc_info.reason = REASON_XMAS_PKT;
+		return dc_info;
+    }
 
     shared_lock<shared_mutex> lock(ruletable_rwlock);
     for ( rule_idx = 0; rule_idx < nb_rules; rule_idx++ ) {
@@ -103,6 +121,7 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
              cmp_proto(rule.proto, pkt->proto) &&
              cmp_port(rule.sport, pkt->sport, rule.sport_mask) &&
              cmp_port(rule.dport, pkt->dport, rule.dport_mask) ) {
+			std::cout << "Checking rule " << rule.name.data() << std::endl;
             dc_info.decision = rule.action;
             dc_info.rule_idx = rule_idx;
             dc_info.reason = REASON_RULE;
