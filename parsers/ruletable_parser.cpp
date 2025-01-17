@@ -14,8 +14,8 @@
 #include <vector>
 
 constexpr auto   RULE_FIELD_DELIM = ' ';
-constexpr auto   RULE_NB_FIELDS = 9;
-constexpr be32_t IPADDR_ANY_MASK = 0x0000'0000;
+constexpr auto   RULE_NB_FIELDS   = 9;
+constexpr be32_t IPADDR_ANY_MASK  = 0x0000'0000;
 
 /* helper function
  * calculates len of a field, given a pair of start and end indices */
@@ -55,7 +55,7 @@ parse_line(const char *rule, char field_delim, char field_end_char) {
 static int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
                         be32_t *ipaddr_dest_mask) {
     constexpr auto IP_NB_FIELDS = 4;
-    be32_t         ipaddr_val = 0;
+    be32_t         ipaddr_val   = 0;
     /* variable to hold the intermediate values in range [0,255] */
     int ip_field_val;
 
@@ -108,11 +108,11 @@ static int parse_port(const std::string &port_str, be16_t *port_dest,
     std::string str_to_parse;
     switch ( port_str.at(0) ) {
         case '<':
-            *port_mask = PORT_LT;
+            *port_mask   = PORT_LT;
             str_to_parse = port_str.substr(1, port_str.size() - 1);
             break;
         case '>':
-            *port_mask = PORT_GT;
+            *port_mask   = PORT_GT;
             str_to_parse = port_str.substr(1, port_str.size() - 1);
             break;
         case '0':
@@ -134,7 +134,7 @@ static int parse_port(const std::string &port_str, be16_t *port_dest,
         case '8':
             [[fallthrough]];
         case '9':
-            *port_mask = PORT_EQ;
+            *port_mask   = PORT_EQ;
             str_to_parse = port_str;
             break;
         default:
@@ -165,21 +165,21 @@ std::string fmt_ipaddr(be32_t ipaddr, uint32_t ipaddr_mask, bool add_mask) {
     /* remove trailing delim */
     ip_str.pop_back();
 
-	if(!add_mask) return ip_str;
+    if ( !add_mask ) return ip_str;
 
     /* determine mask size based on ipaddr_mask, assuming mask is some sequence
      * of 1's followed by 0's only */
     int ipaddr_mask_val = -1;
     for ( int i = 0; i <= sizeof(ipaddr_mask) * CHAR_BIT; i++ ) {
-        if ( (ipaddr_mask << i) == 0 || i == 32) {
+        if ( (ipaddr_mask << i) == 0 || i == 32 ) {
             ipaddr_mask_val = i;
             break;
         }
     }
 
-	if(ipaddr_mask_val == -1) {
-		ERROR("Couldn't determine mask of ipaddr %s", ip_str.data());
-	}
+    if ( ipaddr_mask_val == -1 ) {
+        ERROR("Couldn't determine mask of ipaddr %s", ip_str.data());
+    }
 
     ip_str.append("/");
     ip_str.append(std::to_string(ipaddr_mask_val));
@@ -187,9 +187,15 @@ std::string fmt_ipaddr(be32_t ipaddr, uint32_t ipaddr_mask, bool add_mask) {
     return ip_str;
 }
 
+std::string fmt_port(be16_t port) {
+    std::string res;
+    uint16_t    port_le = ntohs(port);
+    return std::to_string(port_le);
+}
+
 using field_pairings_t = std::initializer_list<std::pair<const char *, int>>;
 
-static constexpr int    ANY = 0x1;
+static constexpr int    ANY                 = 0x1;
 static field_pairings_t direction_converter = {
     {"any", UNSPEC}, {"in", IN}, {"out", OUT}};
 static field_pairings_t saddr_converter = {{"any", ANY}};
@@ -198,7 +204,7 @@ static field_pairings_t daddr_converter = {{"any", ANY}};
 static field_pairings_t proto_converter = {
     {"any", PROTO_ANY}, {"TCP", TCP}, {"UDP", UDP}, {"ICMP", ICMP}};
 static field_pairings_t dport_converter = {{"any", ANY}};
-static field_pairings_t ack_converter = {
+static field_pairings_t ack_converter   = {
     {"any", ACK_ANY}, {"yes", ACK_YES}, {"no", ACK_NO}};
 static field_pairings_t action_converter = {{"accept", PKT_PASS},
                                             {"drop", PKT_DROP}};
@@ -213,7 +219,7 @@ int fmt_rule(rule_entry rule, std::string &rule_txt) {
             if ( pair.second == entry ) {
                 rule_txt.append(pair.first);
                 rule_txt.append(DELIM);
-				return;
+                return;
             }
         }
     };
@@ -230,7 +236,7 @@ int fmt_rule(rule_entry rule, std::string &rule_txt) {
 
     auto append_port = [&rule_txt, convert_field, DELIM](be16_t port,
                                                          be16_t port_mask) {
-        std::string port_str = std::to_string(port);
+        std::string port_str = fmt_port(port);
         switch ( port_mask ) {
             case PORT_ANY:
                 convert_field(sport_converter, ANY);
@@ -304,7 +310,7 @@ int parse_rule(const char *rule /* delimited by null byte */,
 
     /* parse name */
     std::pair name_indices = field_indices[name_field_idx];
-    int       name_len = field_len(name_indices);
+    int       name_len     = field_len(name_indices);
     if ( name_len >
          rule_entry.name.size() - 1 /* -1 save space for nul byte*/ ) {
         ERROR("Rule name `%.*s`... too long, maximum length is %d characters",

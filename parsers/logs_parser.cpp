@@ -50,8 +50,8 @@ std::string fmt_log(log_row_t log) {
     append_field(log_txt, datetime);
     append_field(log_txt, fmt_ipaddr(log.saddr, 0, false));
     append_field(log_txt, fmt_ipaddr(log.daddr, 0, false));
-    append_field(log_txt, std::to_string(log.sport));
-    append_field(log_txt, std::to_string(log.dport));
+    append_field(log_txt, fmt_port(log.sport));
+    append_field(log_txt, fmt_port(log.dport));
     append_field(log_txt, convert_field(proto_converter, log.protocol));
     append_field(log_txt, convert_field(action_converter, log.action));
     if ( log.reason == REASON_RULE ) {
