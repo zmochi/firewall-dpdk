@@ -1,4 +1,4 @@
-CC = clang++
+CXX = clang++
 
 DPDK_CFLAGS = $(shell pkg-config --cflags libdpdk)
 DPDK_LIBFLAGS = $(shell pkg-config --libs libdpdk)
@@ -63,7 +63,7 @@ interface_hdeps = \
 	parsers/ruletable_parser.hpp \
 	ruletable.hpp
 
-# files that need to be compiled with DPDK flags
+# files that need to be compiled into object files with DPDK flags
 DPDK_OBJS = fw_dpdk.cpp
 
 all: directories $(FW_EXE) $(IFACE_EXE)
@@ -72,19 +72,19 @@ debug: cflags += -g -O0
 debug: all
 
 $(FW_EXE): $(fw_odeps) $(fw_hdeps)
-	$(CC) $(cflags) $(fw_cflags) $(DPDK_CFLAGS) $(fw_odeps) -o $(FW_EXE) $(DPDK_LIBFLAGS) 
+	$(CXX) $(cflags) $(fw_cflags) $(DPDK_CFLAGS) $(fw_odeps) -o $(FW_EXE) $(DPDK_LIBFLAGS) 
 
 $(IFACE_EXE): $(interface_odeps) $(interface_hdeps)
-	$(CC) $(cflags) $(interface_cflags) $(interface_odeps) -o $(IFACE_EXE)
+	$(CXX) $(cflags) $(interface_cflags) $(interface_odeps) -o $(IFACE_EXE)
 
 $(OBJ_DIR)/%.o: %.cpp
-	$(CC) $(cflags) $(fw_cflags) -c $< -o $@
+	$(CXX) $(cflags) $(fw_cflags) -c $< -o $@
 
 $(OBJ_DIR)/interfaces/%.o: interfaces/%.cpp
-	$(CC) $(cflags) $(interface_cflags) -c $< -o $@
+	$(CXX) $(cflags) $(interface_cflags) -c $< -o $@
 
 $(OBJ_DIR)/$(DPDK_OBJS:.cpp=.o): $(DPDK_OBJS)
-	$(CC) $(cflags) $(DPDK_CFLAGS) -c $< -o $@
+	$(CXX) $(cflags) $(DPDK_CFLAGS) -c $< -o $@
 
 directories: $(DIRS)
 

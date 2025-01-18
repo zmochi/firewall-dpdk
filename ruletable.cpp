@@ -40,11 +40,11 @@ int ruletable::add_rule(rule_entry rule) {
 }
 
 bool cmp_direction(direction rule_direction, direction pkt_direction) {
-	/* NUL_DIRECTION indicates error */
+    /* NUL_DIRECTION indicates error */
     if ( rule_direction == NUL_DIRECTION || pkt_direction == NUL_DIRECTION ) {
-		ERROR("One of rule_direction or pkt_direction have invalid value");
+        ERROR("One of rule_direction or pkt_direction have invalid value");
         return false;
-	}
+    }
     if ( rule_direction == UNSPEC ) return true;
 
     return rule_direction == pkt_direction;
@@ -55,10 +55,11 @@ bool cmp_ipaddr(be32_t ip1, be32_t ip2, be32_t mask) {
 }
 
 bool cmp_port(be16_t rule_port, be16_t pkt_port, be16_t port_mask) {
+    // TODO: get rid of ntohs() calls here
     if ( port_mask & PORT_LT )
-        return pkt_port < rule_port;
+        return ntohs(pkt_port) < ntohs(rule_port);
     else if ( port_mask & PORT_GT )
-        return pkt_port > rule_port;
+        return ntohs(pkt_port) > ntohs(rule_port);
     else if ( port_mask & PORT_EQ )
         return rule_port == pkt_port;
     else if ( port_mask & PORT_ANY )
@@ -101,14 +102,14 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
 
     if ( pkt->eth_proto != ETHTYPE_IPV4 ) {
         dc_info.decision = PKT_PASS;
-		dc_info.reason = REASON_NONIPV4;
+        dc_info.reason = REASON_NONIPV4;
         return dc_info;
     }
 
     if ( (pkt->tcp_flags & XMAS_PKT_FLAGS) == XMAS_PKT_FLAGS ) {
         dc_info.decision = PKT_DROP;
         dc_info.reason = REASON_XMAS_PKT;
-		return dc_info;
+        return dc_info;
     }
 
     shared_lock<shared_mutex> lock(ruletable_rwlock);
@@ -121,7 +122,7 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
              cmp_proto(rule.proto, pkt->proto) &&
              cmp_port(rule.sport, pkt->sport, rule.sport_mask) &&
              cmp_port(rule.dport, pkt->dport, rule.dport_mask) ) {
-			std::cout << "Checking rule " << rule.name.data() << std::endl;
+            std::cout << "Checking rule " << rule.name.data() << std::endl;
             dc_info.decision = rule.action;
             dc_info.rule_idx = rule_idx;
             dc_info.reason = REASON_RULE;
