@@ -3,7 +3,8 @@
 
 #include "endian.hpp"
 #include "packet.hpp"
-#include "ruletable.hpp"
+#include "fnv_hash.hpp"
+#include <mutex>
 #include <cstring> /* for memcpy */
 #include <unordered_map>
 
@@ -64,26 +65,9 @@ struct hasher_log_row_t {
     (((uint64_t)row.dport << 48) | ((uint64_t)row.sport << 32) |               \
      ((uint64_t)row.saddr))
 
-    std::size_t operator()(const log_row_t &log_row) const { /* do hashing */
-        /* values of FNV_offset_basis, FNV_prime and algorithm taken from
-         * https://en.wikipedia.org/wiki/Fowler–Noll–Vo_hash_function
-         */
-
-        /* store in array to iterate over each byte separately */
+    std::size_t operator()(const log_row_t &log_row) const {
         uint64_t      raw_hash_data = ROW_HASH_DATA(log_row);
-        unsigned char data_to_hash[sizeof(raw_hash_data)];
-        memcpy(data_to_hash, &raw_hash_data, sizeof(uint64_t));
-
-        uint64_t FNV_offset_basis = 0xcbf29ce484222325;
-        uint64_t FNV_prime = 0x00000100000001b3;
-        uint64_t hash = FNV_offset_basis;
-
-        /* TODO: add unroll directive? */
-        for ( int i = 0; i < sizeof(data_to_hash); i++ ) {
-            hash ^= data_to_hash[i];
-            hash *= FNV_prime;
-        }
-
+		uint64_t hash = fnv_hash(raw_hash_data);
         return static_cast<std::size_t>(hash);
     }
 };

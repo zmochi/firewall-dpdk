@@ -1,5 +1,4 @@
 #include <cstring>
-#include <iostream>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_memory.h>
@@ -39,31 +38,13 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
         return -1;
     }
 
-    uint64_t dev_tx_capa = dev_info.tx_offload_capa;
-    uint64_t dev_rx_capa = dev_info.rx_offload_capa;
-    if ( !(dev_tx_capa & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM) ||
-         !(dev_tx_capa & RTE_ETH_TX_OFFLOAD_TCP_CKSUM) ||
-         !(dev_rx_capa & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) ||
-         !(dev_rx_capa & RTE_ETH_RX_OFFLOAD_TCP_CKSUM) ) {
-        ERROR("Device doesn't support required offload capabilities\n");
-        return -1;
-    }
-
     /* use default rx/tx configuration given by driver in
-     * rte_eth_dev_info_get(), and have the device calculate and verify IP and
-     * TCP checksums of incoming (rx) and outgoing (tx) packets.
+     * rte_eth_dev_info_get()
      *
      * portconf is used to configure the NIC, rxconf and txconf are used to
-     * configure each ring on the NIC (not sure if rxconf/txconf have to be
-     * configured with the offloads separately) */
-    uint64_t offloads =
-        RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
+     * configure each ring on the NIC */
     txconf = dev_info.default_txconf;
     rxconf = dev_info.default_rxconf;
-    // port_conf.txmode.offloads |= offloads;
-    // port_conf.rxmode.offloads |= offloads;
-    // txconf.offloads |= offloads;
-    // rxconf.offloads |= offloads;
 
     /* configure NIC
      * must adjust port settings on port_conf before this */
@@ -139,13 +120,20 @@ int init_sigint_handler() {
 #include <rte_ip.h>
 #include <rte_tcp.h>
 
+#include "conn_table.hpp"
 #include "firewall.hpp"
 #include "logger.hpp"
 #include "packet.hpp"
 #include "ruletable.hpp"
 
-pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
-                              direction pkt_direction, log_list &logger) {
+/* @brief fills pkt_props struct with data from packet.
+ * if packet is not long enough to contain all fields in the pkt_props struct,
+ * the struct instance is returned partially filled (unfilled fields get their
+ * respective NUL/INVALID special values) with all available info.
+ *
+ * @return the pkt_props struct instance.
+ */
+pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     struct pkt_props    pkt_props;
     struct rte_tcp_hdr *tcp_hdr = {};
 
@@ -166,14 +154,19 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
 
     if ( eff_pktlen < ethhdr_size ) {
         ERROR("Packet too small to contain ethernet header");
-        return PKT_DROP;
+        pkt_props.eth_proto = ETHTYPE_NUL;
+        return pkt_props;
     }
 
     pkt_props.eth_proto = static_cast<eth_proto>(eth_hdr->ether_type);
 
     eff_pktlen -= ethhdr_size;
 
-    if ( pkt_props.eth_proto == ETHTYPE_IPV4 && eff_pktlen > ipv4hdr_size ) {
+    if ( pkt_props.eth_proto == ETHTYPE_IPV4 ) {
+        if ( eff_pktlen > ipv4hdr_size ) {
+            pkt_props.eth_proto = ETHTYPE_NUL;
+            return pkt_props;
+        }
         struct rte_ipv4_hdr *ipv4_hdr =
             (struct rte_ipv4_hdr *)((char *)eth_hdr + ethhdr_size);
         pkt_props.proto = static_cast<proto>(ipv4_hdr->next_proto_id);
@@ -184,15 +177,21 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
 
         eff_pktlen -= ipv4hdr_size;
 
-        if ( ipv4_hdr->next_proto_id == IPPROTO_TCP &&
-             eff_pktlen > tcphdr_size ) {
+        if ( ipv4_hdr->next_proto_id == IPPROTO_TCP ) {
+            if ( eff_pktlen > tcphdr_size ) {
+                pkt_props.proto = NUL_PROTO;
+                return pkt_props;
+            }
             tcp_hdr = (struct rte_tcp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
             pkt_props.sport = tcp_hdr->src_port;
             pkt_props.dport = tcp_hdr->dst_port;
             pkt_props.tcp_flags =
                 static_cast<enum tcp_flags>(tcp_hdr->tcp_flags);
-        } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP &&
-                    eff_pktlen > udphdr_size ) {
+        } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP ) {
+            if ( eff_pktlen > udphdr_size ) {
+                pkt_props.proto = NUL_PROTO;
+                return pkt_props;
+            }
             struct rte_udp_hdr *udp_hdr =
                 (struct rte_udp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
             pkt_props.sport = udp_hdr->src_port;
@@ -202,17 +201,30 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
 
     pkt_props.direction = pkt_direction;
 
+    return pkt_props;
+}
+
+pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
+                              direction pkt_direction, log_list &logger) {
+    pkt_props     pkt_props = extract_pkt_props(pkt, pkt_direction);
     decision_info dc;
-    reason_t      reason;
 
-    /* decisions done here ONLY */
-    dc = ruletable.query(&pkt_props, PKT_DROP);
+    if ( pkt_props.eth_proto != ETHTYPE_IPV4 ) {
+        return PKT_PASS;
+    }
 
-#ifdef DEBUG
-    std::cout << "Decided to "
-              << ((dc.decision == PKT_DROP) ? "DROP" : "ACCEPT") << std::endl;
-#endif
+    if ( pkt_props.proto == IPPROTO_TCP &&
+         pkt_props.tcp_flags & TCP_ACK_FLAG ) {
+        dc = tcp_existing_conn(pkt_props);
+    } else {
+        dc = ruletable.query(&pkt_props, PKT_DROP);
 
+        if ( pkt_props.proto == IPPROTO_TCP && dc.decision != PKT_DROP ) {
+            dc = tcp_new_conn(pkt_props, dc);
+        }
+    }
+
+    /* only log IPv4 traffic */
     if ( dc.reason != REASON_NONIPV4 )
         logger.store_log(log_row_t(pkt_props, dc));
 
@@ -242,9 +254,6 @@ int switch_src_maddr(struct rte_mbuf *pkt, uint16_t port) {
 
 int firewall_loop(struct ruletable &ruletable, log_list &logger,
                   uint16_t in_port, uint16_t out_port) {
-#ifdef DEBUG
-    std::cout << "Started firewall loop" << std::endl;
-#endif
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
      * recv_burst[]) using rte_eth_rx_burst()
@@ -263,10 +272,6 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
     int       mask      = 0xFFFF;
     int       cnt       = 0;
 
-#ifdef DEBUG
-    std::cout << "in_port = " << in_port << " out_port = " << out_port
-              << std::endl;
-#endif
 
     while ( true ) {
         /* switches between in_port and out_port, forwarding packets in both
@@ -276,35 +281,16 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
         direction = static_cast<enum direction>(direction ^ (OUT ^ IN));
 
         if ( (cnt++ & mask) == mask || (cnt & mask) == mask )
-#ifdef DEBUG
-            std::cout << "Forwarding ports " << rx_port << " -> " << tx_port
-                      << ", direction: " << ((direction == IN) ? "IN" : "OUT")
-                      << std::endl;
-#endif
 
         nb_pkts_rx = rte_eth_rx_burst(rx_port, 0, recv_burst, RX_BURST_SIZE);
 
-#ifdef DEBUG
-        if ( nb_pkts_rx > 0 ) {
-            std::cout << "Got " << nb_pkts_rx << " packets" << std::endl;
-        }
-#endif
 
-#ifdef DEBUG
-        if ( rx_port == out_port && (cnt & mask) == 0xFFF )
-            std::cout << "OUT_PORT: received " << nb_pkts_rx << " packets"
-                      << std::endl;
-#endif
 
         nb_pkts_tx_total = 0;
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
               recv_pkt_idx++ ) {
             if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
                                         direction, logger) == PKT_PASS ) {
-#ifdef DEBUG
-                std::cout << "Added packet to send queue, direction: "
-                          << ((direction == IN) ? "IN" : "OUT") << std::endl;
-#endif
                 struct rte_mbuf *pkt           = recv_burst[recv_pkt_idx];
                 send_burst[nb_pkts_tx_total++] = pkt;
             }
@@ -313,20 +299,11 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
         /* rte_eth_tx_burst() is responsible for freeing sent packets */
         nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, send_burst, nb_pkts_tx_total);
 
-#ifdef DEBUG
-        if ( nb_pkts_tx > 0 ) {
-            std::cout << "Sent " << nb_pkts_tx << " packets, port " << rx_port
-                      << " -> port " << tx_port << std::endl;
-        }
-#endif
 
         /* free unsent packets. if rte_eth_tx_burst() was unable to transmit all
          * packets, the tx queue is full. drop remaining packets to not hold up
          * the execution */
         for ( int i = nb_pkts_tx; i < nb_pkts_tx_total; i++ ) {
-#ifdef DEBUG
-            std::cout << "Freeing unsent packet " << i << std::endl;
-#endif
             rte_pktmbuf_free(send_burst[i]);
         }
     }

@@ -16,6 +16,7 @@ enum proto : uint8_t {
 
 static_assert(__BYTE_ORDER == __LITTLE_ENDIAN);
 enum eth_proto : be16_t {
+    ETHTYPE_NUL = 0xFFFF,  /* marked as reserved in IEEE 802 */
     ETHTYPE_IPV4 = 0x0008, /* 0x0800 in big endian */
     ETHTYPE_IPV6 = 0x0608, /* 0x0806 in big endian */
     ETHTYPE_ARP = 0xDD86,  /* 0x86DD in big endian */
@@ -47,18 +48,46 @@ enum tcp_flags : uint8_t {
     TCP_NUL_FLAG = 0x00,
 };
 
+typedef enum : int {
+    REASON_XMAS_PKT,
+    REASON_NO_RULE,
+    REASON_RULE,
+    REASON_NONIPV4,
+    REASON_STATEFUL_INVALID_FLAGS,
+    REASON_STATEFUL_CONN_EXISTS,
+} reason_t;
+
+#include <cassert>
+struct decision_info {
+    /* relevant when reason is REASON_RULE */
+    int      rule_idx;
+    pkt_dc   decision;
+    reason_t reason;
+
+    decision_info() {}
+
+    decision_info(pkt_dc decision, reason_t reason)
+        : rule_idx(-1), decision(decision), reason(reason) {
+        assert(reason != REASON_RULE);
+    }
+
+    decision_info(int rule_idx, pkt_dc decision, reason_t reason)
+        : rule_idx(rule_idx), decision(decision), reason(reason) {}
+};
+
 struct pkt_props {
     direction direction;
-    be32_t  saddr;
-    be32_t  daddr;
+    be32_t    saddr;
+    be32_t    daddr;
     proto     proto;
     eth_proto eth_proto;
-    be16_t  sport;
-    be16_t  dport;
+    be16_t    sport;
+    be16_t    dport;
     tcp_flags tcp_flags;
 
     pkt_props()
-        : tcp_flags(TCP_NUL_FLAG), direction(NUL_DIRECTION), proto(NUL_PROTO) {}
+        : tcp_flags(TCP_NUL_FLAG), direction(NUL_DIRECTION), proto(NUL_PROTO),
+          eth_proto(ETHTYPE_NUL) {}
 
     pkt_props(::proto proto, be32_t saddr, be32_t daddr, be16_t sport,
               be16_t dport, enum tcp_flags tcp_flags)
