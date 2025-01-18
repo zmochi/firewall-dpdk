@@ -50,11 +50,19 @@ enum tcp_flags : uint8_t {
 
 typedef enum : int {
     REASON_XMAS_PKT,
+    /* no matching rule found in static table */
     REASON_NO_RULE,
+    /* matching rule found in static table */
     REASON_RULE,
     REASON_NONIPV4,
+    /* invalid combination of TCP flags in packet */
     REASON_STATEFUL_INVALID_FLAGS,
+    /* ACK=0 but connection with matching src/dst addr and src/dst port already
+       exists in connection table */
     REASON_STATEFUL_CONN_EXISTS,
+    /* ACK=1 but connection with matching src/dst addr and src/dst port doesn't
+       exist in connection table */
+    REASON_STATEFUL_NO_CONN,
 } reason_t;
 
 #include <cassert>
