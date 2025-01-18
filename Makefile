@@ -68,7 +68,7 @@ DPDK_OBJS = fw_dpdk.cpp
 
 all: directories $(FW_EXE) $(IFACE_EXE)
 
-debug: cflags += -g -O0
+debug: cflags += -g -O0 -DDEBUG
 debug: all
 
 $(FW_EXE): $(fw_odeps) $(fw_hdeps)
