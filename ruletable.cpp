@@ -102,13 +102,13 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
 
     if ( pkt->eth_proto != ETHTYPE_IPV4 ) {
         dc_info.decision = PKT_PASS;
-        dc_info.reason = REASON_NONIPV4;
+        dc_info.reason   = REASON_NONIPV4;
         return dc_info;
     }
 
     if ( (pkt->tcp_flags & XMAS_PKT_FLAGS) == XMAS_PKT_FLAGS ) {
         dc_info.decision = PKT_DROP;
-        dc_info.reason = REASON_XMAS_PKT;
+        dc_info.reason   = REASON_XMAS_PKT;
         return dc_info;
     }
 
@@ -122,10 +122,9 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
              cmp_proto(rule.proto, pkt->proto) &&
              cmp_port(rule.sport, pkt->sport, rule.sport_mask) &&
              cmp_port(rule.dport, pkt->dport, rule.dport_mask) ) {
-            std::cout << "Checking rule " << rule.name.data() << std::endl;
             dc_info.decision = rule.action;
             dc_info.rule_idx = rule_idx;
-            dc_info.reason = REASON_RULE;
+            dc_info.reason   = REASON_RULE;
             break;
         }
     }
@@ -135,7 +134,7 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
     if ( rule_idx == nb_rules ) {
         dc_info.decision = NO_MATCHING_RULE_DC;
         dc_info.rule_idx = -1;
-        dc_info.reason = REASON_NO_RULE;
+        dc_info.reason   = REASON_NO_RULE;
     }
 
     return dc_info;

@@ -1,0 +1,28 @@
+network:
+    ethernets:
+        enp0s2:
+            dhcp4: true
+
+        enp0s3:
+            dhcp4: false
+            dhcp6: false
+            link-local: []
+            addresses:
+                - 10.1.1.3/24
+            match:
+                macaddress:
+                    56:e4:7f:f0:9a:fa
+            set-name: int_host
+
+        enp0s4:
+            dhcp4: false
+            dhcp6: false
+            link-local: []
+            addresses:
+                - 10.1.2.3/24
+            match:
+                macaddress:
+                    7a:db:a5:08:d3:9c
+            set-name: ext_host
+
+    version: 2
