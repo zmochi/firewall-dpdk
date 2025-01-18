@@ -1,0 +1,22 @@
+network:
+  version: 2
+  ethernets:
+    enp0s2:
+      match:
+        macaddress: "52:54:00:12:34:56"
+      dhcp4: true
+      dhcp6: true
+      set-name: "enp0s2"
+
+    enp0s3:
+      match:
+        macaddress: "8a:6c:1b:cd:4d:1e"
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - 10.1.2.2/24
+      routes:
+        # any packets whose destinations match this subnet, send through this interface
+        - to: 10.1.1.0/24
+      set-name: fw
+
