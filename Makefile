@@ -22,7 +22,9 @@ fw_cdeps = \
 	logger.cpp \
 	macaddr.cpp \
 	interfaces/ruletable_server.cpp \
-
+	fnv_hash.cpp \
+	conn_table.cpp
+	
 fw_odeps = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(fw_cdeps))
 
 fw_hdeps = \
@@ -38,6 +40,8 @@ fw_hdeps = \
 	logger.hpp \
 	ruletable.hpp \
 	interfaces/ruletable_server.hpp \
+	fnv_hash.hpp \
+	conn_table.hpp
 
 interface_cdeps = \
 	interfaces/interface_main.cpp \

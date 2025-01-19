@@ -1,8 +1,9 @@
 #include "firewall.hpp"
-#include "logger.hpp"
 #include "interfaces/logs_interface.hpp"
-#include "interfaces/ruletable_interface.hpp"
 #include "interfaces/logs_server.hpp"
+#include "interfaces/ruletable_interface.hpp"
+#include "interfaces/ruletable_server.hpp"
+#include "logger.hpp"
 #include "macaddr.hpp"
 #include "ruletable.hpp"
 #include "utils.h"
@@ -22,7 +23,8 @@ void ruletable_thread(ruletable &rt, const std::string &interface_file_path,
     start_ruletable(rt, interface_file_path, interface_file_permissions);
 }
 
-void logger_thread(log_list &logger, const std::string &interface_file_path, int interface_file_permissions) {
+void logger_thread(log_list &logger, const std::string &interface_file_path,
+                   int interface_file_permissions) {
     start_log_server(logger, interface_file_path, interface_file_permissions);
 }
 
@@ -31,11 +33,11 @@ int main(int argc, char *argv[]) {
         std::cout << "Usage: " << argv[0]
                   << " <internal NIC MAC address> <external NIC MAC address>"
                   << std::endl;
-		return 1;
+        return 1;
     }
 
     /* TODO: move tests to a normal location */
-	//test_parse_mac_addr();
+    // test_parse_mac_addr();
     MAC_addr int_net_mac, ext_net_mac;
     if ( parse_mac_addr(argv[1], int_net_mac) < 0 ) {
         ERROR_EXIT("Error parsing internal network mac address");
@@ -47,13 +49,16 @@ int main(int argc, char *argv[]) {
     log_list  *logger = new struct log_list;
     ruletable *rt = new struct ruletable;
 
-    std::thread log_thread(logger_thread, std::ref(*logger), LOG_INTERFACE_PATH, LOG_INTERFACE_PERMS);
-    std::thread rt_thread(ruletable_thread, std::ref(*rt), RULETABLE_INTERFACE_PATH,
-                          RULETABLE_INTERFACE_PERMS);
-    std::thread fw_thread(firewall_thread, argc - 2, argv, std::ref(*rt), int_net_mac,
-                          ext_net_mac, std::ref(*logger));
+    std::thread log_thread(logger_thread, std::ref(*logger), LOG_INTERFACE_PATH,
+                           LOG_INTERFACE_PERMS);
+    std::thread rt_thread(ruletable_thread, std::ref(*rt),
+                          RULETABLE_INTERFACE_PATH, RULETABLE_INTERFACE_PERMS);
+    std::thread fw_thread(firewall_thread, argc - 2, argv, std::ref(*rt),
+                          int_net_mac, ext_net_mac, std::ref(*logger));
 
-    log_thread.join();
-    rt_thread.join();
     fw_thread.join();
+    /* quick and dirty solution to exit other threads when returning... */
+    rt_thread.detach();
+    log_thread.detach();
+    return 0;
 }

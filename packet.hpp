@@ -54,18 +54,17 @@ typedef enum : int {
     REASON_NO_RULE,
     /* matching rule found in static table */
     REASON_RULE,
+    /* packet is allowed, exists in connection table */
+    REASON_STATEFUL_OK,
     REASON_NONIPV4,
     /* invalid combination of TCP flags in packet */
-    REASON_STATEFUL_INVALID_FLAGS,
+    REASON_STATEFUL_INVALID,
     /* ACK=0 but connection with matching src/dst addr and src/dst port already
        exists in connection table */
     REASON_STATEFUL_CONN_EXISTS,
-    /* ACK=1 but connection with matching src/dst addr and src/dst port doesn't
-       exist in connection table */
-    REASON_STATEFUL_NO_CONN,
 } reason_t;
 
-#include <cassert>
+#include <stdexcept>
 struct decision_info {
     /* relevant when reason is REASON_RULE */
     int      rule_idx;
@@ -76,7 +75,9 @@ struct decision_info {
 
     decision_info(pkt_dc decision, reason_t reason)
         : rule_idx(-1), decision(decision), reason(reason) {
-        assert(reason != REASON_RULE);
+        if ( reason == REASON_RULE )
+            throw std::invalid_argument(
+                "Can't set decision_info REASON_RULE without rule index");
     }
 
     decision_info(int rule_idx, pkt_dc decision, reason_t reason)

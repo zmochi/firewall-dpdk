@@ -1,6 +1,7 @@
-#include <cstring>
-#include "macaddr.hpp"
 #include "logger.hpp"
+#include "macaddr.hpp"
+#include "ruletable.hpp"
+#include <cstring>
 
-int start_firewall(int argc, char **argv, struct ruletable &ruletable,
-                   MAC_addr in_mac, MAC_addr out_mac, log_list &logger);
+int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
+                   MAC_addr out_mac, log_list &logger);

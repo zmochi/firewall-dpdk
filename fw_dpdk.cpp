@@ -160,12 +160,12 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
      */
     struct rte_ether_hdr *eth_hdr =
         rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
-    size_t           eff_pktlen   = rte_pktmbuf_pkt_len(&pkt);
-    constexpr size_t ethhdr_size  = sizeof(struct rte_ether_hdr),
+    size_t           eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
+    constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
                      ipv4hdr_size = sizeof(struct rte_ipv4_hdr),
                      ipv6hdr_size = sizeof(struct rte_ipv6_hdr),
-                     tcphdr_size  = sizeof(struct rte_tcp_hdr),
-                     udphdr_size  = sizeof(struct rte_udp_hdr),
+                     tcphdr_size = sizeof(struct rte_tcp_hdr),
+                     udphdr_size = sizeof(struct rte_udp_hdr),
                      icmphdr_size = sizeof(struct rte_icmp_hdr);
 
     if ( eff_pktlen < ethhdr_size ) {
@@ -179,7 +179,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     eff_pktlen -= ethhdr_size;
 
     if ( pkt_props.eth_proto == ETHTYPE_IPV4 ) {
-        if ( eff_pktlen > ipv4hdr_size ) {
+        if ( eff_pktlen < ipv4hdr_size ) {
             pkt_props.eth_proto = ETHTYPE_NUL;
             return pkt_props;
         }
@@ -194,7 +194,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
         eff_pktlen -= ipv4hdr_size;
 
         if ( ipv4_hdr->next_proto_id == IPPROTO_TCP ) {
-            if ( eff_pktlen > tcphdr_size ) {
+            if ( eff_pktlen < tcphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
                 return pkt_props;
             }
@@ -204,7 +204,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
             pkt_props.tcp_flags =
                 static_cast<enum tcp_flags>(tcp_hdr->tcp_flags);
         } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP ) {
-            if ( eff_pktlen > udphdr_size ) {
+            if ( eff_pktlen < udphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
                 return pkt_props;
             }
@@ -221,7 +221,8 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
 }
 
 pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
-                              direction pkt_direction, log_list &logger) {
+                              direction pkt_direction, log_list &logger,
+                              conn_table &conn_table) {
     pkt_props     pkt_props = extract_pkt_props(pkt, pkt_direction);
     decision_info dc;
 
@@ -231,12 +232,12 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
 
     if ( pkt_props.proto == IPPROTO_TCP &&
          pkt_props.tcp_flags & TCP_ACK_FLAG ) {
-        dc = tcp_existing_conn(pkt_props);
+        dc = conn_table.tcp_existing_conn(pkt_props);
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
         if ( pkt_props.proto == IPPROTO_TCP && dc.decision != PKT_DROP ) {
-            dc = tcp_new_conn(pkt_props, dc);
+            dc = conn_table.tcp_new_conn(pkt_props, dc);
         }
     }
 
@@ -269,7 +270,7 @@ int switch_src_maddr(struct rte_mbuf *pkt, uint16_t port) {
 }
 
 int firewall_loop(struct ruletable &ruletable, log_list &logger,
-                  uint16_t in_port, uint16_t out_port) {
+                  conn_table &conn_table, uint16_t in_port, uint16_t out_port) {
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
      * recv_burst[]) using rte_eth_rx_burst()
@@ -299,8 +300,9 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
               recv_pkt_idx++ ) {
             if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
-                                        direction, logger) == PKT_PASS ) {
-                struct rte_mbuf *pkt           = recv_burst[recv_pkt_idx];
+                                        direction, logger,
+                                        conn_table) == PKT_PASS ) {
+                struct rte_mbuf *pkt = recv_burst[recv_pkt_idx];
                 send_burst[nb_pkts_tx_total++] = pkt;
             }
         }
@@ -310,7 +312,7 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
 
         /* free unsent packets. if rte_eth_tx_burst() was unable to transmit all
          * packets, the tx queue is full. drop remaining packets to not hold up
-         * the execution */
+         * the execution (instead of sending again) */
         for ( int i = nb_pkts_tx; i < nb_pkts_tx_total; i++ ) {
             rte_pktmbuf_free(send_burst[i]);
         }
@@ -396,6 +398,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         printf("Initialized port %u\n", port);
     }
 
+    conn_table conn_table;
+
     if ( int_port == 0xFFFF ) {
         ERROR("Port with specified internal MAC address not found");
         goto cleanup;
@@ -407,7 +411,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     }
 
     force_quit = false;
-    if ( firewall_loop(rt, logger, int_port, ext_port) < 0 ) {
+    if ( firewall_loop(rt, logger, conn_table, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
         goto cleanup;
     }
