@@ -10,9 +10,13 @@ OBJ_DIR = obj
 
 DIRS = $(OBJ_DIR) $(OBJ_DIR)/interfaces $(OBJ_DIR)/parsers
 
-cflags = -std=c++17
+cflags = -std=c++17 -MMD -MP
 fw_cflags = 
 interface_cflags = 
+
+-include $(wildcard $(OBJ_DIR)/**/*.d)
+# for some reason above wildcard doesn't include files directly in OBJ_DIR
+-include $(wildcard $(OBJ_DIR)/*.d)
 
 fw_cdeps = \
 	main.cpp \
@@ -27,22 +31,6 @@ fw_cdeps = \
 	
 fw_odeps = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(fw_cdeps))
 
-fw_hdeps = \
-	interfaces/ruletable_interface.hpp \
-	interfaces/simple_ipc.hpp \
-	macaddr.hpp \
-	interfaces/logs_interface.hpp \
-	packet.hpp \
-	firewall.hpp \
-	interfaces/ruletable_client.hpp \
-	interfaces/logs_server.hpp \
-	endian.hpp \
-	logger.hpp \
-	ruletable.hpp \
-	interfaces/ruletable_server.hpp \
-	fnv_hash.hpp \
-	conn_table.hpp
-
 interface_cdeps = \
 	interfaces/interface_main.cpp \
 	interfaces/ruletable_client.cpp \
@@ -53,19 +41,6 @@ interface_cdeps = \
 	parsers/ruletable_parser.cpp \
 
 interface_odeps = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(interface_cdeps))
-
-interface_hdeps = \
-	interfaces/ruletable_interface.hpp \
-	interfaces/simple_ipc.hpp \
-	interfaces/logs_interface.hpp \
-	packet.hpp \
-	interfaces/ruletable_client.hpp \
-	interfaces/logs_client.hpp \
-	endian.hpp \
-	logger.hpp \
-	parsers/logs_parser.hpp \
-	parsers/ruletable_parser.hpp \
-	ruletable.hpp
 
 # files that need to be compiled into object files with DPDK flags
 DPDK_OBJS = fw_dpdk.cpp

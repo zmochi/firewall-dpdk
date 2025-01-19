@@ -54,9 +54,7 @@ decision_info conn_table::tcp_existing_conn(pkt_props props) {
     return decision_info(pkt_entry->rule_idx, PKT_PASS, REASON_RULE);
 }
 
-void conn_table::add_entry(conn_table_entry entry) {
-    entries.emplace(std::make_pair(entry, entry));
-}
+void conn_table::add_entry(conn_table_entry entry) { entries[entry] = entry; }
 
 conn_table_entry *conn_table::lookup_entry(conn_table_entry entry) {
     auto map_entry = entries.find(entry);

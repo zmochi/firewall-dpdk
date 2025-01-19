@@ -23,6 +23,10 @@ struct conn_table_entry {
     state_t state;
     int     rule_idx;
 
+    /* empty constructor to be able to assign entries[conn_table_entry] =
+     * entry_instance*/
+    conn_table_entry() {}
+
     conn_table_entry(pkt_props pkt)
         : saddr(pkt.saddr), daddr(pkt.daddr), sport(pkt.sport),
           dport(pkt.dport), state(STATE_NUL) {}
@@ -35,7 +39,7 @@ struct conn_table_entry {
         : saddr(saddr), daddr(daddr), sport(sport), dport(dport),
           state(STATE_NUL) {}
 
-	/* must be implemented for hashing */
+    /* must be implemented for hashing */
     bool operator==(const conn_table_entry &other) const {
         return (other.saddr == saddr && other.daddr == daddr &&
                 other.sport == sport && other.dport == dport) ||
@@ -46,15 +50,7 @@ struct conn_table_entry {
 
 #include <cassert>
 struct conn_table_entry_hasher {
-    uint64_t get_hash_input(const conn_table_entry &entry) const {
-        be16_t  *saddr_split = reinterpret_cast<be16_t *>(entry.saddr);
-        uint64_t saddr_half1 = saddr_split[0];
-        uint64_t saddr_half2 = saddr_split[1];
-
-        be16_t  *daddr_split = reinterpret_cast<be16_t *>(entry.daddr);
-        uint64_t daddr_half1 = daddr_split[0];
-        uint64_t daddr_half2 = daddr_split[1];
-
+    static uint64_t get_hash_input(const conn_table_entry &entry) {
         be32_t saddr = entry.saddr, daddr = entry.daddr;
         be16_t sport = entry.sport, dport = entry.dport;
         auto   combine = [](be32_t ip, be16_t port) {
@@ -66,18 +62,18 @@ struct conn_table_entry_hasher {
     }
 
     std::size_t operator()(const conn_table_entry &entry) const {
-        test_hash();
         uint64_t hash_input = get_hash_input(entry);
         return static_cast<std::size_t>(fnv_hash(hash_input));
     }
 
     static void test_hash() {
-        assert(conn_table_entry_hasher()(conn_table_entry(10, 15, 20, 30)) ==
-               conn_table_entry_hasher()(conn_table_entry(15, 10, 30, 20)));
-        assert(conn_table_entry_hasher()(conn_table_entry(10, 15, 20, 30)) !=
-               conn_table_entry_hasher()(conn_table_entry(15, 10, 20, 30)));
-        assert(conn_table_entry_hasher()(conn_table_entry(10, 15, 20, 30)) !=
-               conn_table_entry_hasher()(conn_table_entry(10, 15, 30, 20)));
+        /* test symmetry */
+        assert(fnv_hash(get_hash_input(conn_table_entry(10, 15, 20, 30))) ==
+               fnv_hash(get_hash_input(conn_table_entry(15, 10, 30, 20))));
+        assert(fnv_hash(get_hash_input(conn_table_entry(10, 15, 20, 30))) !=
+               fnv_hash(get_hash_input(conn_table_entry(15, 10, 20, 30))));
+        assert(fnv_hash(get_hash_input(conn_table_entry(10, 15, 20, 30))) !=
+               fnv_hash(get_hash_input(conn_table_entry(10, 15, 30, 20))));
     }
 };
 
