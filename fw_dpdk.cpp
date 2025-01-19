@@ -8,6 +8,8 @@
 
 static const uint16_t nb_rx_rings = 1, nb_tx_rings = 1;
 const int             MBUF_POOL_ELMS_PER_RING = 1024;
+static uint16_t       int_port, ext_port;
+volatile bool         force_quit;
 
 int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     /* the basic steps are:
@@ -100,16 +102,30 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     return 0;
 }
 
+#include <signal.h>
+struct sigaction old_act;
+
 void sigint_handler(int sig) {
-    if ( rte_eal_cleanup() < 0 ) rte_exit(1, "error on releasing resources\n");
-    rte_exit(1, "Done\n");
+    force_quit = true;
+
+    printf("Stopping gracefully...\n");
+
+    /*if ( sigaction(SIGINT, &old_act, nullptr) != 0 ) {
+        ERROR("Couldn't install old signal handler");
+        return;
+    }
+
+    raise(SIGINT);*/
 }
 
 int init_sigint_handler() {
-    struct sigaction act;
+    struct sigaction act = {};
+    sigemptyset(&act.sa_mask);
     act.sa_handler = sigint_handler;
-    if ( sigaction(SIGINT, &act, NULL) != 0 ) {
-        printf("Couldn't assign handler to SIGINT\n");
+
+    if ( sigaction(SIGINT, &act, &old_act) != 0 ) {
+        ERROR("Couldn't assign handler to SIGINT");
+        return 1;
     }
 
     return 0;
@@ -269,22 +285,15 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
 
     int       rx_port = in_port, tx_port = out_port;
     direction direction = OUT;
-    int       mask      = 0xFFFF;
-    int       cnt       = 0;
 
-
-    while ( true ) {
+    while ( !force_quit ) {
         /* switches between in_port and out_port, forwarding packets in both
          * directions in alternating order */
         rx_port ^= (in_port ^ out_port);
         tx_port ^= (in_port ^ out_port);
         direction = static_cast<enum direction>(direction ^ (OUT ^ IN));
 
-        if ( (cnt++ & mask) == mask || (cnt & mask) == mask )
-
         nb_pkts_rx = rte_eth_rx_burst(rx_port, 0, recv_burst, RX_BURST_SIZE);
-
-
 
         nb_pkts_tx_total = 0;
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
@@ -299,7 +308,6 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
         /* rte_eth_tx_burst() is responsible for freeing sent packets */
         nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, send_burst, nb_pkts_tx_total);
 
-
         /* free unsent packets. if rte_eth_tx_burst() was unable to transmit all
          * packets, the tx queue is full. drop remaining packets to not hold up
          * the execution */
@@ -307,6 +315,8 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
             rte_pktmbuf_free(send_burst[i]);
         }
     }
+
+    return 0;
 }
 
 /*
@@ -317,15 +327,13 @@ int firewall_loop(struct ruletable &ruletable, log_list &logger,
  * @param ruletable reference to ruletable
  * @param in_mac out_mac MAC addresses of internal network NIC and external
  * network NIC respectively
- * @param log_fd file descriptor for transmitting logs, each write to the fd is
- * an entire log_row_t
+ * @param logger log_list to record logs in
  */
 int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
                    MAC_addr out_mac, log_list &logger) {
     int ret;
     /* internal and external NIC identifiers, initialized with invalid values
      * (assigned real ones later) */
-    uint16_t            int_port = 0xFFFF, ext_port = 0xFFFF;
     struct rte_mempool *mbuf_pool;
 
     if ( init_sigint_handler() != 0 ) return EXIT_FAILURE;
@@ -360,6 +368,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         rte_exit(1, "Couldn't create pktmbuf_pool");
     }
 
+    /* sentinel values to indicate failure */
+    int_port = 0xFFFF, ext_port = 0xFFFF;
     /* NIC to initialize */
     uint16_t port;
     RTE_ETH_FOREACH_DEV(port) {
@@ -396,16 +406,22 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         goto cleanup;
     }
 
+    force_quit = false;
     if ( firewall_loop(rt, logger, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
         goto cleanup;
     }
 
-    /* cleanup also handled in SIGINT handler */
 cleanup:
+    if ( rte_eth_dev_stop(int_port) != 0 )
+        rte_exit(1, "Couldn't stop internal port");
+    if ( rte_eth_dev_stop(ext_port) != 0 )
+        rte_exit(1, "Couldn't stop external port");
+
     if ( rte_eal_cleanup() < 0 ) {
         ERROR("error on releasing resources\n");
         return -1;
     }
+
     return 0;
 }
