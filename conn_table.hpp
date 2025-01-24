@@ -6,53 +6,77 @@
 #include "packet.hpp"
 #include <unordered_map>
 
+/* states aligned with names in Wikipedia table
+ * en.wikipedia.org/wiki/Transmission_Control_Protocol#Protocol_operation
+ * under "Protocol operation"
+ */
 enum state_t {
     STATE_NUL,
-    STATE_SYN,
-    STATE_SYN_ACK,
-    STATE_ESTABLISHED,
+    SYN_SENT,
+    SYN_RECEIVED,
+    ESTABLISHED,
+    FIN_WAIT_1,
+    SERVER_FIN,
+    SERVER_FIN_IS_ACK,
+    CLIENT_FIN,
+    CLIENT_FIN_IS_ACK,
+    FIN_WAIT_2,
+    CLOSE_WAIT,
+    CLOSING,
+    LAST_ACK,
+    TIME_WAIT,
     STATE_FTP_ESTABLISHED,
     STATE_FTP_DATA,
 };
 
+using seq_t = be32_t;
+
 struct conn_table_entry {
-    be32_t  saddr;
-    be32_t  daddr;
-    be16_t  sport;
-    be16_t  dport;
-    state_t state;
-    int     rule_idx;
+    be32_t  client_addr = 0;
+    be32_t  server_addr = 0;
+    be16_t  client_port = 0;
+    be16_t  server_port = 0;
+    state_t state = STATE_NUL;
+    int     rule_idx = -1;
+    seq_t  server_fin = false;
+    seq_t  client_fin = false;
 
     /* empty constructor to be able to assign entries[conn_table_entry] =
      * entry_instance*/
     conn_table_entry() {}
 
     conn_table_entry(pkt_props pkt)
-        : saddr(pkt.saddr), daddr(pkt.daddr), sport(pkt.sport),
-          dport(pkt.dport), state(STATE_NUL) {}
+        : client_addr(pkt.saddr), server_addr(pkt.daddr),
+          client_port(pkt.sport), server_port(pkt.dport), state(STATE_NUL) {}
 
     conn_table_entry(pkt_props pkt, state_t state)
-        : saddr(pkt.saddr), daddr(pkt.daddr), sport(pkt.sport),
-          dport(pkt.dport), state(state) {}
+        : client_addr(pkt.saddr), server_addr(pkt.daddr),
+          client_port(pkt.sport), server_port(pkt.dport), state(state) {}
 
     conn_table_entry(be32_t saddr, be32_t daddr, be16_t sport, be16_t dport)
-        : saddr(saddr), daddr(daddr), sport(sport), dport(dport),
-          state(STATE_NUL) {}
+        : client_addr(saddr), server_addr(daddr), client_port(sport),
+          server_port(dport), state(STATE_NUL) {}
 
     /* must be implemented for hashing */
     bool operator==(const conn_table_entry &other) const {
-        return (other.saddr == saddr && other.daddr == daddr &&
-                other.sport == sport && other.dport == dport) ||
-               (other.saddr == daddr && other.daddr == saddr &&
-                other.sport == dport && other.dport == sport);
+        return (other.client_addr == client_addr &&
+                other.server_addr == server_addr &&
+                other.client_port == client_port &&
+                other.server_port == server_port) ||
+               (other.client_addr == server_addr &&
+                other.server_addr == client_addr &&
+                other.client_port == server_port &&
+                other.server_port == client_port);
     }
 };
 
 #include <cassert>
 struct conn_table_entry_hasher {
+    /* hash input doesn't change when you exchange src ip <-> dst ip AND src
+     * port <-> dst port */
     static uint64_t get_hash_input(const conn_table_entry &entry) {
-        be32_t saddr = entry.saddr, daddr = entry.daddr;
-        be16_t sport = entry.sport, dport = entry.dport;
+        be32_t saddr = entry.client_addr, daddr = entry.server_addr;
+        be16_t sport = entry.client_port, dport = entry.server_port;
         auto   combine = [](be32_t ip, be16_t port) {
             uint64_t seed = 0;
             return fnv_hash(seed | ((uint64_t)port << 32) | ip);
@@ -63,6 +87,8 @@ struct conn_table_entry_hasher {
 
     std::size_t operator()(const conn_table_entry &entry) const {
         uint64_t hash_input = get_hash_input(entry);
+        /* no special reason to use fnv_hash() instead of std::hash(), I just
+         * didn't know std::hash() existed before */
         return static_cast<std::size_t>(fnv_hash(hash_input));
     }
 
@@ -84,6 +110,8 @@ class conn_table {
         entries;
 
   public:
+    conn_table() : entries() {}
+
     decision_info tcp_new_conn(pkt_props props, decision_info static_rt_dc);
 
     decision_info tcp_existing_conn(pkt_props props);
@@ -94,9 +122,5 @@ class conn_table {
 
     void remove_entry(conn_table_entry &entry);
 };
-
-void tcp_new_conn(pkt_props props, pkt_dc static_rt_dc, conn_table &table);
-
-decision_info tcp_existing_conn(pkt_props props, conn_table &table);
 
 #endif /* __CONN_TABLE_H */

@@ -398,7 +398,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         printf("Initialized port %u\n", port);
     }
 
-    conn_table conn_table;
+    conn_table *conn_table = new class conn_table();
 
     if ( int_port == 0xFFFF ) {
         ERROR("Port with specified internal MAC address not found");
@@ -411,7 +411,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     }
 
     force_quit = false;
-    if ( firewall_loop(rt, logger, conn_table, int_port, ext_port) < 0 ) {
+    if ( firewall_loop(rt, logger, *conn_table, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
         goto cleanup;
     }

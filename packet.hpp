@@ -54,14 +54,14 @@ typedef enum : int {
     REASON_NO_RULE,
     /* matching rule found in static table */
     REASON_RULE,
-    /* packet is allowed, exists in connection table */
-    REASON_STATEFUL_OK,
     REASON_NONIPV4,
     /* invalid combination of TCP flags in packet */
     REASON_STATEFUL_INVALID,
     /* ACK=0 but connection with matching src/dst addr and src/dst port already
        exists in connection table */
     REASON_STATEFUL_CONN_EXISTS,
+	/* packet with RST bit on */
+	REASON_STATEFUL_RST,
 } reason_t;
 
 #include <stdexcept>
