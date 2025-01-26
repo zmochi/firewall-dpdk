@@ -6,6 +6,13 @@
 
 #include "utils.h"
 
+static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
+                        ipv4hdr_size = sizeof(struct rte_ipv4_hdr),
+                        ipv6hdr_size = sizeof(struct rte_ipv6_hdr),
+                        tcphdr_size = sizeof(struct rte_tcp_hdr),
+                        udphdr_size = sizeof(struct rte_udp_hdr),
+                        icmphdr_size = sizeof(struct rte_icmp_hdr);
+
 static const uint16_t nb_rx_rings = 1, nb_tx_rings = 1;
 const int             MBUF_POOL_ELMS_PER_RING = 1024;
 static uint16_t       int_port, ext_port;
@@ -160,20 +167,18 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
      */
     struct rte_ether_hdr *eth_hdr =
         rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
-    size_t           eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
-    constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
-                     ipv4hdr_size = sizeof(struct rte_ipv4_hdr),
-                     ipv6hdr_size = sizeof(struct rte_ipv6_hdr),
-                     tcphdr_size = sizeof(struct rte_tcp_hdr),
-                     udphdr_size = sizeof(struct rte_udp_hdr),
-                     icmphdr_size = sizeof(struct rte_icmp_hdr);
+    size_t eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
 
     if ( eff_pktlen < ethhdr_size ) {
         ERROR("Packet too small to contain ethernet header");
         pkt_props.eth_proto = ETHTYPE_NUL;
         return pkt_props;
     }
-
+    /*
+     * there might be a better way to check packet types (ipv4, tcp, ...),
+     * using https://doc.dpdk.org/api/rte__mbuf__ptype_8h.html
+     * and the `packet_type` field in struct rte_mbuf
+     */
     pkt_props.eth_proto = static_cast<eth_proto>(eth_hdr->ether_type);
 
     eff_pktlen -= ethhdr_size;
@@ -203,6 +208,8 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
             pkt_props.dport = tcp_hdr->dst_port;
             pkt_props.tcp_flags =
                 static_cast<enum tcp_flags>(tcp_hdr->tcp_flags);
+            pkt_props.seq_nb = tcp_hdr->sent_seq;
+            pkt_props.ack_nb = tcp_hdr->recv_ack;
         } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP ) {
             if ( eff_pktlen < udphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
@@ -224,19 +231,17 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
                               direction pkt_direction, log_list &logger,
                               conn_table &conn_table) {
     pkt_props     pkt_props = extract_pkt_props(pkt, pkt_direction);
+    bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
+    bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
+    bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
     decision_info dc;
 
-    if ( pkt_props.eth_proto != ETHTYPE_IPV4 ) {
-        return PKT_PASS;
-    }
-
-    if ( pkt_props.proto == IPPROTO_TCP &&
-         pkt_props.tcp_flags & TCP_ACK_FLAG ) {
+    if ( is_tcp && has_ack ) {
         dc = conn_table.tcp_existing_conn(pkt_props);
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
-        if ( pkt_props.proto == IPPROTO_TCP && dc.decision != PKT_DROP ) {
+        if ( is_tcp && dc.decision != PKT_DROP ) {
             dc = conn_table.tcp_new_conn(pkt_props, dc);
         }
     }
@@ -248,28 +253,23 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
     return dc.decision;
 }
 
-/* @brief switches the source MAC address in pkt to the MAC address of port
- * @param pkt pointer to packet (rte_mbuf) whose src MAC address to switch
- * @param port identifier of port that has the new mac address
- */
-int switch_src_maddr(struct rte_mbuf *pkt, uint16_t port) {
-    if ( rte_pktmbuf_pkt_len(pkt) < sizeof(struct rte_ether_hdr) ) {
-        ERROR(
-            "Packet too short, not enough space to contain an ethernet header");
-        return -1;
-    }
+bool is_tcp_pkt(struct rte_mbuf &pkt, size_t pkt_len) {
+    if ( pkt_len < ethhdr_size + ipv4hdr_size + tcphdr_size ) return false;
 
-    struct rte_ether_hdr *pkt_ethhdr =
-        rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-    struct rte_ether_addr new_mac;
-    rte_eth_macaddr_get(port, &new_mac);
+    struct rte_ether_hdr *ethhdr =
+        reinterpret_cast<struct rte_ether_hdr *>(&pkt);
 
-    rte_ether_addr_copy(&new_mac, &pkt_ethhdr->src_addr);
+    if ( ethhdr->ether_type != ETHTYPE_IPV4 ) return false;
 
-    return 0;
+    struct rte_ipv4_hdr *iphdr =
+        reinterpret_cast<struct rte_ipv4_hdr *>((char *)ethhdr + ipv4hdr_size);
+
+    if ( iphdr->next_proto_id != IPPROTO_TCP ) return false;
+
+    return true;
 }
 
-int firewall_loop(struct ruletable &ruletable, log_list &logger,
+int firewall_loop(ruletable &ruletable, log_list &logger,
                   conn_table &conn_table, uint16_t in_port, uint16_t out_port) {
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in

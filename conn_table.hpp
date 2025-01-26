@@ -10,36 +10,37 @@
  * en.wikipedia.org/wiki/Transmission_Control_Protocol#Protocol_operation
  * under "Protocol operation"
  */
+
+/* TWH stands for Three Way Handshake */
 enum state_t {
     STATE_NUL,
-    SYN_SENT,
-    SYN_RECEIVED,
+    TWH_SYN_SENT,
+    TWH_SYN_ACK_RECEIVED,
+    TWH_SYN_ACK_SENT,
+    TWH_ACK_RECEIVED,
     ESTABLISHED,
-    FIN_WAIT_1,
-    SERVER_FIN,
-    SERVER_FIN_IS_ACK,
-    CLIENT_FIN,
-    CLIENT_FIN_IS_ACK,
-    FIN_WAIT_2,
-    CLOSE_WAIT,
-    CLOSING,
-    LAST_ACK,
-    TIME_WAIT,
-    STATE_FTP_ESTABLISHED,
-    STATE_FTP_DATA,
+    /* fin sent only */
+    FIN_SENT,
+    /* fin sent and acked */
+    FIN_ACKED,
 };
-
-using seq_t = be32_t;
 
 struct conn_table_entry {
     be32_t  client_addr = 0;
     be32_t  server_addr = 0;
     be16_t  client_port = 0;
     be16_t  server_port = 0;
-    state_t state = STATE_NUL;
+    state_t client_state = STATE_NUL;
+    state_t server_state = STATE_NUL;
     int     rule_idx = -1;
-    seq_t  server_fin = false;
-    seq_t  client_fin = false;
+    /* stores the sequence number of FIN. use 0 to indicate no FIN was sent (0
+     * is a valid value but low probability to be hit so I guess this is okay)
+     */
+    seq_t server_fin = 0;
+    seq_t client_fin = 0;
+    /* (TODO) current or initial (TODO) client/server sequence numbers */
+    seq_t server_seq;
+    seq_t client_seq;
 
     /* empty constructor to be able to assign entries[conn_table_entry] =
      * entry_instance*/
@@ -47,15 +48,16 @@ struct conn_table_entry {
 
     conn_table_entry(pkt_props pkt)
         : client_addr(pkt.saddr), server_addr(pkt.daddr),
-          client_port(pkt.sport), server_port(pkt.dport), state(STATE_NUL) {}
+          client_port(pkt.sport), server_port(pkt.dport),
+          client_state(STATE_NUL) {}
 
     conn_table_entry(pkt_props pkt, state_t state)
         : client_addr(pkt.saddr), server_addr(pkt.daddr),
-          client_port(pkt.sport), server_port(pkt.dport), state(state) {}
+          client_port(pkt.sport), server_port(pkt.dport), client_state(state) {}
 
     conn_table_entry(be32_t saddr, be32_t daddr, be16_t sport, be16_t dport)
         : client_addr(saddr), server_addr(daddr), client_port(sport),
-          server_port(dport), state(STATE_NUL) {}
+          server_port(dport), client_state(STATE_NUL) {}
 
     /* must be implemented for hashing */
     bool operator==(const conn_table_entry &other) const {
@@ -110,6 +112,7 @@ class conn_table {
         entries;
 
   public:
+
     conn_table() : entries() {}
 
     decision_info tcp_new_conn(pkt_props props, decision_info static_rt_dc);

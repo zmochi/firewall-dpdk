@@ -18,7 +18,11 @@ static field_pairings_t reason_converter = {
     {"REASON_NO_MATCHING_RULE", REASON_NO_RULE},
     {"REASON_XMAS_PKT", REASON_XMAS_PKT},
     {"REASON_NONIPV4", REASON_NONIPV4},
-    {"fmt_log error!!", REASON_RULE} /* reason should be the rule idx */};
+    {"fmt_log error!!", REASON_RULE}, /* reason should be the rule idx */
+    {"REASON_STATEFUL_INVALID", REASON_STATEFUL_INVALID},
+    {"REASON_STATEFUL_CONN_EXISTS", REASON_STATEFUL_CONN_EXISTS},
+	{"REASON_STATEFUL_RST", REASON_STATEFUL_RST},
+};
 
 const char *LOG_TXT_TITLE = "timestamp\t\tsrc_ip\t\tdst_ip\t\tsrc_port\t\tdst_"
                             "port\t\tprotocol\t\taction\t\treason\t\tcount";

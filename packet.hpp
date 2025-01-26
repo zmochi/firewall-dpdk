@@ -84,6 +84,8 @@ struct decision_info {
         : rule_idx(rule_idx), decision(decision), reason(reason) {}
 };
 
+using seq_t = be32_t;
+
 struct pkt_props {
     direction direction;
     be32_t    saddr;
@@ -93,6 +95,8 @@ struct pkt_props {
     be16_t    sport;
     be16_t    dport;
     tcp_flags tcp_flags;
+	seq_t ack_nb;
+	seq_t seq_nb;
 
     pkt_props()
         : tcp_flags(TCP_NUL_FLAG), direction(NUL_DIRECTION), proto(NUL_PROTO),
