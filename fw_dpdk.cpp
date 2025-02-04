@@ -30,9 +30,9 @@ char *get_ethhdr_data(struct rte_mbuf *pkt) {
 char *get_ipv4hdr_data(struct rte_mbuf *pkt) {
     auto  *iphdr = (struct rte_ipv4_hdr *)get_ethhdr_data(pkt);
     size_t ipv4hdr_size = (iphdr->ihl & 0x0F) * 4;
-	if(ipv4hdr_size < 20 || ipv4hdr_size > 60) {
-		std::cout << "Bad ipv4hdr_size" << std::endl;
-	}
+    if ( ipv4hdr_size < 20 || ipv4hdr_size > 60 ) {
+        std::cout << "Bad ipv4hdr_size" << std::endl;
+    }
 
     return (char *)iphdr + ipv4hdr_size;
 }
@@ -40,9 +40,9 @@ char *get_ipv4hdr_data(struct rte_mbuf *pkt) {
 char *get_tcphdr_data(struct rte_mbuf *pkt) {
     auto  *tcp_hdr = (struct rte_tcp_hdr *)get_ipv4hdr_data(pkt);
     size_t tcphdr_size = ((tcp_hdr->data_off & 0xF0) >> 4) * 4;
-	if(tcphdr_size < 20 || tcphdr_size > 60) {
-		std::cout << "Bad tcphdr_size" << std::endl;
-	}
+    if ( tcphdr_size < 20 || tcphdr_size > 60 ) {
+        std::cout << "Bad tcphdr_size" << std::endl;
+    }
 
     return (char *)tcp_hdr + tcphdr_size;
 }
@@ -82,9 +82,9 @@ struct port_data {
         }
     }
 
-	void cleanup() {
+    void cleanup() {
         if ( ip_frag_tbl != nullptr ) rte_ip_frag_table_destroy(ip_frag_tbl);
-	}
+    }
 };
 
 struct rte_mbuf *ipv4_reassemble(port_data &pdata, struct rte_mbuf *mbuf,
@@ -248,6 +248,7 @@ int init_sigint_handler() {
 #include <rte_ip.h>
 #include <rte_tcp.h>
 
+#include "DLP/filter.hpp"
 #include "conn_table.hpp"
 #include "firewall.hpp"
 #include "logger.hpp"
@@ -338,18 +339,24 @@ ret:
     return pkt_props;
 }
 
+<<<<<<< HEAD
 uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
                         struct rte_mbuf **outgoing_pkts,
                         const uint16_t    outoging_pkts_cap,
                         const uint64_t    timestamp) {
     uint16_t pkt_cnt = 0;
-    if ( get_eth_hdr(pkt)->ether_type == ETHTYPE_IPV4 && rte_ipv4_frag_pkt_is_fragmented((struct rte_ipv4_hdr*)get_ethhdr_data(pkt))) {
-		printf("got fragmented packet\n");
+    if ( get_eth_hdr(pkt)->ether_type == ETHTYPE_IPV4 &&
+         rte_ipv4_frag_pkt_is_fragmented(
+             (struct rte_ipv4_hdr *)get_ethhdr_data(pkt)) ) {
+        printf("got fragmented packet\n");
         // ipv4_reassemble either returns null (and "saves" the passed packet
         // for later) or returns the reassembled packet.
         outgoing_pkts[0] = ipv4_reassemble(
             pdata, pkt, (struct rte_ipv4_hdr *)get_ethhdr_data(pkt), timestamp);
-        if ( outgoing_pkts[0] != nullptr ) {pkt_cnt++; printf("reassembled packet!\n");}
+        if ( outgoing_pkts[0] != nullptr ) {
+            pkt_cnt++;
+            printf("reassembled packet!\n");
+        }
     } else {
         outgoing_pkts[0] = pkt;
         pkt_cnt++;
@@ -366,16 +373,26 @@ uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
  * @param logger logger instance to log packet decisions into.
  * @param conn_table connection table to consult if packet is TCP and has ACK=1.
  */
-pkt_dc query_decision_and_log(const pkt_props   pkt_props,
+pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
                               struct ruletable &ruletable, log_list &logger,
-                              conn_table &conn_table) {
+                              conn_table &conn_table, filter_fn filter_cb) {
     bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
     bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
     bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
     decision_info dc;
 
+    uint16_t ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
+    uint16_t tcphdr_size = get_tcphdr_data(&pkt) - get_ipv4hdr_data(&pkt);
     if ( is_tcp && has_ack ) {
         dc = conn_table.tcp_existing_conn(pkt_props);
+        filter_dc f_dc =
+            filter_cb(get_tcphdr_data(&pkt),
+                      rte_pktmbuf_pkt_len(&pkt) -
+                          (get_tcphdr_data(&pkt) - (char *)get_eth_hdr(&pkt)));
+        if ( f_dc == FILTER_DROP ) {
+            dc.decision = PKT_DROP;
+            dc.reason = REASON_FILTER;
+        }
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
@@ -589,9 +606,9 @@ cleanup:
     if ( rte_eth_dev_stop(ext_port.port) != 0 )
         rte_exit(1, "Couldn't stop external port");
 
-	// must free ip_frag_tbl before rte_eal_cleanup, or get segfault
-	int_port.cleanup();
-	ext_port.cleanup();
+    // must free ip_frag_tbl before rte_eal_cleanup, or get segfault
+    int_port.cleanup();
+    ext_port.cleanup();
 
     if ( rte_eal_cleanup() < 0 ) {
         ERROR("error on releasing resources\n");

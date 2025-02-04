@@ -62,6 +62,7 @@ typedef enum : int {
     REASON_STATEFUL_CONN_EXISTS,
 	/* packet with RST bit on */
 	REASON_STATEFUL_RST,
+	REASON_FILTER,
 } reason_t;
 
 #include <stdexcept>

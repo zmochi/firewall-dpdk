@@ -8,7 +8,7 @@ FW_EXE = fw
 
 OBJ_DIR = obj
 
-DIRS = $(OBJ_DIR) $(OBJ_DIR)/interfaces $(OBJ_DIR)/parsers
+DIRS = $(OBJ_DIR) $(OBJ_DIR)/interfaces $(OBJ_DIR)/parsers $(OBJ_DIR)/DLP
 
 cflags = -std=c++17 -MMD -MP
 fw_cflags = 
@@ -57,6 +57,9 @@ $(OBJ_DIR)/%.o: %.cpp
 
 $(OBJ_DIR)/interfaces/%.o: interfaces/%.cpp
 	$(CXX) $(cflags) $(interface_cflags) -c $< -o $@
+
+$(OBJ_DIR)/DLP/%.o: DLP/%.cpp
+	$(CXX) $(cflags) -c $< -o $@
 
 $(OBJ_DIR)/$(DPDK_OBJS:.cpp=.o): $(DPDK_OBJS)
 	$(CXX) $(cflags) $(DPDK_CFLAGS) -c $< -o $@
