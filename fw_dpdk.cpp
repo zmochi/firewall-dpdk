@@ -4,6 +4,12 @@
 #include <rte_memory.h>
 #include <signal.h>
 
+// libntoh/tcpreassembly.h is missing `extern "C"`, so need to wrap it
+extern "C" {
+#include <libntoh/libntoh.h>
+#include <libntoh/tcpreassembly.h>
+}
+
 #include "utils.h"
 
 static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
@@ -18,6 +24,10 @@ const int             MBUF_POOL_ELMS_PER_RING = 1024;
 static uint16_t       int_port, ext_port;
 volatile bool         force_quit;
 
+/*
+ * @brief configure and start a port (NIC), set up rx/tx rings and queues. this
+ * function also set promiscuous mode.
+ */
 int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
     /* the basic steps are:
      * check if the given port is valid, with rte_eth_dev_is_valid_port()
@@ -113,16 +123,11 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 struct sigaction old_act;
 
 void sigint_handler(int sig) {
+    /* this flag is read on every iteration in firewall_loop() (main loop that
+     * handles rx/tx) */
     force_quit = true;
 
     printf("Stopping gracefully...\n");
-
-    /*if ( sigaction(SIGINT, &old_act, nullptr) != 0 ) {
-        ERROR("Couldn't install old signal handler");
-        return;
-    }
-
-    raise(SIGINT);*/
 }
 
 int init_sigint_handler() {
@@ -227,6 +232,14 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     return pkt_props;
 }
 
+/* @brief receive a packet and make a decision whether to drop or pass the
+ * packet.
+ * @param pkt packet to make decision on.
+ * @param ruletable ruletable to consult on static rules.
+ * @param pkt_direction direction of the packet, becomes part of pkt_props.
+ * @param logger logger instance to log packet decisions into.
+ * @param conn_table connection table to consult if packet is TCP and has ACK=1.
+ */
 pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
                               direction pkt_direction, log_list &logger,
                               conn_table &conn_table) {
@@ -253,6 +266,9 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
     return dc.decision;
 }
 
+/* @brief does minimal checks to know if packet is TCP (unlike extract_pkt_props
+ * which does more work). currently unused.
+ */
 bool is_tcp_pkt(struct rte_mbuf &pkt, size_t pkt_len) {
     if ( pkt_len < ethhdr_size + ipv4hdr_size + tcphdr_size ) return false;
 
@@ -269,6 +285,15 @@ bool is_tcp_pkt(struct rte_mbuf &pkt, size_t pkt_len) {
     return true;
 }
 
+/* @brief main DPDK loop that extracts packets, calls query_decision_and_log()
+ * on each packet, and transmits the packet if the decision is PKT_PASS.
+ *
+ * @param ruletable ruletable to pass to query_decision_and_log.
+ * @param logger log instance to pass to query_decision_and_log.
+ * @param conn_table connection table to pass to query_decision_and_log.
+ * @param in_port DPDK port number of internal network NIC.
+ * @param out_port DPDK port number of external network NIC.
+ */
 int firewall_loop(ruletable &ruletable, log_list &logger,
                   conn_table &conn_table, uint16_t in_port, uint16_t out_port) {
     /*
@@ -361,6 +386,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     argc -= ret;
     argv += ret;
 
+	/* create global DPDK memory pool */
     mbuf_pool = rte_pktmbuf_pool_create(
         "packet_pool",
         (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING * 2,
@@ -370,6 +396,11 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         rte_exit(1, "Couldn't create pktmbuf_pool");
     }
 
+    /**************************
+     * iterates over all available ports, checking each port's MAC. if the MAC
+     * matches internal/external port MACs given in function parameters, set
+     * int_port/ext_port to its matching DPDK port number.
+     */
     /* sentinel values to indicate failure */
     int_port = 0xFFFF, ext_port = 0xFFFF;
     /* NIC to initialize */
@@ -410,6 +441,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         goto cleanup;
     }
 
+    /* main firewall loop. force_quit is used to stop the firewall loop when
+     * Ctrl+C is pressed (see sigint_handler()). */
     force_quit = false;
     if ( firewall_loop(rt, logger, *conn_table, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
