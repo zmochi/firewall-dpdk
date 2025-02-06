@@ -23,7 +23,8 @@ fw_cdeps = \
 	macaddr.cpp \
 	interfaces/ruletable_server.cpp \
 	fnv_hash.cpp \
-	conn_table.cpp
+	conn_table.cpp \
+	$(wildcard DLP/*.cpp)
 	
 fw_odeps = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(fw_cdeps))
 

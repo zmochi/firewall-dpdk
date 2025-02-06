@@ -339,7 +339,6 @@ ret:
     return pkt_props;
 }
 
-<<<<<<< HEAD
 uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
                         struct rte_mbuf **outgoing_pkts,
                         const uint16_t    outoging_pkts_cap,
@@ -365,6 +364,11 @@ uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
     return pkt_cnt;
 }
 
+// HTTP port 80 in big endian
+constexpr be32_t http_port_be = 0x5000;
+// SMTP port 25 in big endian
+constexpr be32_t smtp_port_be = 0x1900;
+
 /* @brief receive a packet and make a decision whether to drop or pass the
  * packet.
  * @param pkt packet to make decision on.
@@ -379,12 +383,14 @@ pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
     bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
     bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
     bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
+    bool           do_filter =
+        pkt_props.direction == OUT && is_tcp && has_ack &&
+        (pkt_props.daddr == http_port_be || pkt_props.daddr == smtp_port_be);
     decision_info dc;
 
     uint16_t ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
     uint16_t tcphdr_size = get_tcphdr_data(&pkt) - get_ipv4hdr_data(&pkt);
-    if ( is_tcp && has_ack ) {
-        dc = conn_table.tcp_existing_conn(pkt_props);
+    if ( do_filter ) {
         filter_dc f_dc =
             filter_cb(get_tcphdr_data(&pkt),
                       rte_pktmbuf_pkt_len(&pkt) -
@@ -392,7 +398,12 @@ pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
         if ( f_dc == FILTER_DROP ) {
             dc.decision = PKT_DROP;
             dc.reason = REASON_FILTER;
+			goto log;
         }
+    }
+
+	if ( is_tcp && has_ack ) {
+        dc = conn_table.tcp_existing_conn(pkt_props);
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
@@ -401,6 +412,7 @@ pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
         }
     }
 
+log:
     /* only log IPv4 traffic */
     if ( dc.reason != REASON_NONIPV4 )
         logger.store_log(log_row_t(pkt_props, dc));
@@ -470,8 +482,8 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
             for ( int i = 0; i < nb_ret_pkts; i++ ) {
                 pkt = send_returning[i];
                 pkt_props props = extract_pkt_props(*pkt, direction);
-                if ( query_decision_and_log(props, ruletable, logger,
-                                            conn_table) == PKT_PASS ) {
+                if ( query_decision_and_log(*pkt, props, ruletable, logger,
+                                            conn_table, filter_c_code) == PKT_PASS ) {
                     send_burst[nb_pkts_tx_total++] = pkt;
                 } else {
                     rte_pktmbuf_free(pkt);

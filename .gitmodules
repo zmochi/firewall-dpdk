@@ -1,3 +1,9 @@
 [submodule "DLP/picohttpparser"]
 	path = DLP/picohttpparser
 	url = https://github.com/h2o/picohttpparser.git
+[submodule "DLP/levenshtein-sse"]
+	path = DLP/levenshtein-sse
+	url = https://github.com/addaleax/levenshtein-sse.git
+[submodule "DLP/aho_corasick"]
+	path = DLP/aho_corasick
+	url = https://github.com/cjgdev/aho_corasick.git

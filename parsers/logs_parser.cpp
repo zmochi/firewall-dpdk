@@ -22,6 +22,7 @@ static field_pairings_t reason_converter = {
     {"REASON_STATEFUL_INVALID", REASON_STATEFUL_INVALID},
     {"REASON_STATEFUL_CONN_EXISTS", REASON_STATEFUL_CONN_EXISTS},
 	{"REASON_STATEFUL_RST", REASON_STATEFUL_RST},
+	{"REASON_FILTER", REASON_FILTER},
 };
 
 const char *LOG_TXT_TITLE = "timestamp\t\tsrc_ip\t\tdst_ip\t\tsrc_port\t\tdst_"
