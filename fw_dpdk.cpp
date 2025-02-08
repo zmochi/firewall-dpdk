@@ -13,11 +13,30 @@ extern "C" {
 #include "utils.h"
 
 static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
-                        ipv4hdr_size = sizeof(struct rte_ipv4_hdr),
-                        ipv6hdr_size = sizeof(struct rte_ipv6_hdr),
-                        tcphdr_size = sizeof(struct rte_tcp_hdr),
                         udphdr_size = sizeof(struct rte_udp_hdr),
                         icmphdr_size = sizeof(struct rte_icmp_hdr);
+
+struct rte_ether_hdr *get_eth_hdr(struct rte_mbuf *pkt) {
+    return rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+}
+
+char *get_ethhdr_data(struct rte_mbuf *pkt) {
+    return (char*)get_eth_hdr(pkt) + ethhdr_size;
+}
+
+char *get_ipv4hdr_data(struct rte_mbuf *pkt) {
+    auto  *iphdr = (struct rte_ipv4_hdr *)get_ethhdr_data(pkt);
+    size_t ipv4hdr_size = (iphdr->ihl) * 4;
+
+    return (char *)iphdr + ipv4hdr_size;
+}
+
+char *get_tcphdr_data(struct rte_mbuf *pkt) {
+    auto  *tcp_hdr = (struct rte_tcp_hdr *)get_ipv4hdr_data(pkt);
+    size_t tcphdr_size = (tcp_hdr->data_off) * 4;
+
+    return (char *)tcp_hdr + tcphdr_size;
+}
 
 static const uint16_t nb_rx_rings = 1, nb_tx_rings = 1;
 const int             MBUF_POOL_ELMS_PER_RING = 1024;
@@ -161,23 +180,28 @@ int init_sigint_handler() {
  *
  * @return the pkt_props struct instance.
  */
+#include <iostream>
 pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     struct pkt_props    pkt_props;
+    pkt_props.direction = pkt_direction;
+
     struct rte_tcp_hdr *tcp_hdr = {};
+
+    size_t tcphdr_size = 0;
+    size_t ipv4hdr_size = 0;
 
     /* struct rte_mbuf of the packet is stored right behind it in memory.
      * rte_pktmbuf_mtod() returns a pointer to the data (the packet itself)
      * of a struct rte_mbuf. for details:
      * https://doc.dpdk.org/guides/prog_guide/mbuf_lib.html
      */
-    struct rte_ether_hdr *eth_hdr =
-        rte_pktmbuf_mtod(&pkt, struct rte_ether_hdr *);
-    size_t eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
+    struct rte_ether_hdr *eth_hdr = get_eth_hdr(&pkt);
+    size_t                eff_pktlen = rte_pktmbuf_pkt_len(&pkt);
 
     if ( eff_pktlen < ethhdr_size ) {
         ERROR("Packet too small to contain ethernet header");
         pkt_props.eth_proto = ETHTYPE_NUL;
-        return pkt_props;
+		goto ret;
     }
     /*
      * there might be a better way to check packet types (ipv4, tcp, ...),
@@ -189,13 +213,12 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     eff_pktlen -= ethhdr_size;
 
     if ( pkt_props.eth_proto == ETHTYPE_IPV4 ) {
+        ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
         if ( eff_pktlen < ipv4hdr_size ) {
             pkt_props.eth_proto = ETHTYPE_NUL;
-            return pkt_props;
+			goto ret;
         }
-        struct rte_ipv4_hdr *ipv4_hdr =
-            (struct rte_ipv4_hdr *)((char *)eth_hdr + ethhdr_size);
-        pkt_props.proto = static_cast<proto>(ipv4_hdr->next_proto_id);
+        auto *ipv4_hdr = (struct rte_ipv4_hdr *)get_ethhdr_data(&pkt);
 
         /* store in network order */
         pkt_props.saddr = ipv4_hdr->src_addr;
@@ -204,11 +227,13 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
         eff_pktlen -= ipv4hdr_size;
 
         if ( ipv4_hdr->next_proto_id == IPPROTO_TCP ) {
+            tcphdr_size = get_tcphdr_data(&pkt) - get_ipv4hdr_data(&pkt);
             if ( eff_pktlen < tcphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
-                return pkt_props;
+				goto ret;
             }
-            tcp_hdr = (struct rte_tcp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
+            pkt_props.proto = TCP;
+            tcp_hdr = (struct rte_tcp_hdr *)get_ipv4hdr_data(&pkt);
             pkt_props.sport = tcp_hdr->src_port;
             pkt_props.dport = tcp_hdr->dst_port;
             pkt_props.tcp_flags =
@@ -218,17 +243,18 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
         } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP ) {
             if ( eff_pktlen < udphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
-                return pkt_props;
+				goto ret;
             }
-            struct rte_udp_hdr *udp_hdr =
-                (struct rte_udp_hdr *)((char *)ipv4_hdr + ipv4hdr_size);
+            pkt_props.proto = UDP;
+            auto *udp_hdr = (struct rte_udp_hdr *)get_ipv4hdr_data(&pkt);
             pkt_props.sport = udp_hdr->src_port;
             pkt_props.dport = udp_hdr->dst_port;
+        } else if ( ipv4_hdr->next_proto_id == IPPROTO_ICMP ) {
+            pkt_props.proto = ICMP;
         }
     }
 
-    pkt_props.direction = pkt_direction;
-
+ret:
     return pkt_props;
 }
 
@@ -264,25 +290,6 @@ pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
         logger.store_log(log_row_t(pkt_props, dc));
 
     return dc.decision;
-}
-
-/* @brief does minimal checks to know if packet is TCP (unlike extract_pkt_props
- * which does more work). currently unused.
- */
-bool is_tcp_pkt(struct rte_mbuf &pkt, size_t pkt_len) {
-    if ( pkt_len < ethhdr_size + ipv4hdr_size + tcphdr_size ) return false;
-
-    struct rte_ether_hdr *ethhdr =
-        reinterpret_cast<struct rte_ether_hdr *>(&pkt);
-
-    if ( ethhdr->ether_type != ETHTYPE_IPV4 ) return false;
-
-    struct rte_ipv4_hdr *iphdr =
-        reinterpret_cast<struct rte_ipv4_hdr *>((char *)ethhdr + ipv4hdr_size);
-
-    if ( iphdr->next_proto_id != IPPROTO_TCP ) return false;
-
-    return true;
 }
 
 /* @brief main DPDK loop that extracts packets, calls query_decision_and_log()
