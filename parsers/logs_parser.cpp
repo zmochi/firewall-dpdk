@@ -11,7 +11,7 @@
 
 using field_pairings_t = std::vector<std::pair<const char *, int>>;
 static field_pairings_t proto_converter = {
-    {"tcp", TCP}, {"udp", UDP}, {"icmp", ICMP}};
+    {"tcp", TCP}, {"udp", UDP}, {"icmp", ICMP}, {"Unknown protocol", NUL_PROTO}};
 static field_pairings_t action_converter = {{"accept", PKT_PASS},
                                             {"drop", PKT_DROP}};
 static field_pairings_t reason_converter = {
