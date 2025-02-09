@@ -42,13 +42,19 @@ interface_odeps = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(interface_cdeps))
 # files that need to be compiled into object files with DPDK flags
 DPDK_OBJS = fw_dpdk.cpp
 
-all: directories $(FW_EXE) $(IFACE_EXE)
+all: libs directories $(FW_EXE) $(IFACE_EXE)
 
 debug: cflags += -g -O0
 debug: all
 
+PCRE2_build_dir = external/PCRE2.build
+PCRE2_LIBFLAGS = -L$(PCRE2_build_dir) -lpcre2-8
+PCRE2_CFLAGS = -I$(PCRE2_build_dir)
+libs:
+	make -C external
+
 $(FW_EXE): $(fw_odeps) $(fw_hdeps)
-	$(CXX) $(cflags) $(fw_cflags) $(DPDK_CFLAGS) $(fw_odeps) -o $(FW_EXE) $(DPDK_LIBFLAGS) 
+	$(CXX) $(cflags) $(fw_cflags) $(DPDK_CFLAGS) $(fw_odeps) -o $(FW_EXE) $(DPDK_LIBFLAGS) $(PCRE2_LIBFLAGS)
 
 $(IFACE_EXE): $(interface_odeps) $(interface_hdeps)
 	$(CXX) $(cflags) $(interface_cflags) $(interface_odeps) -o $(IFACE_EXE)
@@ -60,7 +66,7 @@ $(OBJ_DIR)/interfaces/%.o: interfaces/%.cpp
 	$(CXX) $(cflags) $(interface_cflags) -c $< -o $@
 
 $(OBJ_DIR)/DLP/%.o: DLP/%.cpp
-	$(CXX) $(cflags) -c $< -o $@
+	$(CXX) $(cflags) $(PCRE2_CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/$(DPDK_OBJS:.cpp=.o): $(DPDK_OBJS)
 	$(CXX) $(cflags) $(DPDK_CFLAGS) -c $< -o $@

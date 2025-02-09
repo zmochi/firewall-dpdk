@@ -1,0 +1,12 @@
+MAKE = cmake
+PCRE2_build_dir = ./PCRE2.build
+PCRE2_src = ./pcre2
+
+$(if $(shell which $(MAKE)),,$(error "`$(MAKE)` command not found in path, and is required to build PCRE2."))
+
+all: $(PCRE2_build_dir)
+
+$(PCRE2_build_dir):
+	# `which cmd` returns an empty string if cmd doesn't exist
+	$(MAKE) -B $(PCRE2_build_dir) $(PCRE2_src)
+	$(MAKE) --build $(PCRE2_build_dir)

@@ -7,3 +7,6 @@
 [submodule "DLP/aho_corasick"]
 	path = DLP/aho_corasick
 	url = https://github.com/cjgdev/aho_corasick.git
+[submodule "external/pcre2"]
+	path = external/pcre2
+	url = https://github.com/PCRE2Project/pcre2.git
