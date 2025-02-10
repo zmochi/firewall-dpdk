@@ -1,5 +1,6 @@
 #include <cstring>
 #include <rte_ethdev.h>
+#include <rte_ip_frag.h>
 #include <rte_mbuf.h>
 #include <rte_memory.h>
 #include <signal.h>
@@ -43,11 +44,74 @@ const int             MBUF_POOL_ELMS_PER_RING = 1024;
 static uint16_t       int_port, ext_port;
 volatile bool         force_quit;
 
+struct port_data {
+  private:
+    /* inspired by example packet reassembly app
+     * https://github.com/DPDK/dpdk/blob/main/examples/ip_reassembly/main.c
+     * https://doc.dpdk.org/guides/sample_app_ug/ip_reassembly.html
+     */
+    static constexpr uint32_t f_tbl_nb_buckets = UINT16_MAX;
+    static constexpr uint32_t f_tbl_associativity = 16;
+    static constexpr uint32_t f_tbl_max_entries = f_tbl_nb_buckets;
+    static constexpr uint64_t f_tbl_max_cycles = UINT64_MAX;
+
+  public:
+    uint16_t                     port;
+    struct rte_mempool          *mempool;
+    struct rte_ip_frag_tbl      *ip_frag_tbl;
+    struct rte_ip_frag_death_row dr;
+
+    port_data(uint16_t port, struct rte_mempool *mempool)
+        : port(port), mempool(mempool) {
+        /* put this in init */
+        ip_frag_tbl = rte_ip_frag_table_create(
+            f_tbl_nb_buckets, f_tbl_associativity, f_tbl_max_entries,
+            f_tbl_max_cycles, SOCKET_ID_ANY);
+    }
+
+    ~port_data() { rte_ip_frag_table_destroy(ip_frag_tbl); }
+};
+
+struct rte_mbuf *ipv4_reassemble(port_data &pdata, struct rte_mbuf *mbuf,
+                                 struct rte_ipv4_hdr *ip_hdr,
+                                 uint64_t             timestamp) {
+    if ( mbuf == nullptr || ip_hdr == nullptr ) {
+        ERROR("mbuf or ip_hdr are null");
+        return nullptr;
+    }
+
+    mbuf->l2_len = ethhdr_size;
+    /* ignoring the fact that ip header size is actually variable, since this is
+     * how its done in the example application and they know better than me. */
+    mbuf->l3_len = sizeof(rte_ipv4_hdr);
+
+    if ( ip_hdr->ihl * 4 != sizeof(rte_ipv4_hdr) ) {
+        ERROR("ihl field in ip header is not standard. possible issues?");
+    }
+
+    auto reass_mbuf = rte_ipv4_frag_reassemble_packet(
+        pdata.ip_frag_tbl, &pdata.dr, mbuf, timestamp, ip_hdr);
+
+    if ( reass_mbuf == nullptr ) {
+        // error or not all fragments collected yet
+        return nullptr;
+    }
+
+    if ( rte_pktmbuf_mtod(reass_mbuf, struct rte_ether_hdr *)->ether_type !=
+         rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4) ) {
+        ERROR("Ether type is not IPv4");
+        rte_pktmbuf_mtod(reass_mbuf, struct rte_ether_hdr *)->ether_type =
+            rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4);
+    }
+
+    return reass_mbuf;
+}
+
 /*
  * @brief configure and start a port (NIC), set up rx/tx rings and queues. this
  * function also set promiscuous mode.
  */
-int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
+int port_init(port_data &pdata) {
     /* the basic steps are:
      * check if the given port is valid, with rte_eth_dev_is_valid_port()
      *
@@ -58,6 +122,8 @@ int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
      *
      * set rx/tx callbacks for NIC
      */
+    uint16_t                port = pdata.port;
+    struct rte_mempool     *mbuf_pool = pdata.mempool;
     int                     ret;
     struct rte_eth_conf     port_conf = {};
     struct rte_eth_dev_info dev_info;
@@ -408,10 +474,12 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
      * matches internal/external port MACs given in function parameters, set
      * int_port/ext_port to its matching DPDK port number.
      */
+    auto nb_ports = rte_eth_dev_count_avail();
     /* sentinel values to indicate failure */
     int_port = 0xFFFF, ext_port = 0xFFFF;
     /* NIC to initialize */
-    uint16_t port;
+    uint16_t   port;
+    port_data *ports[nb_ports];
     RTE_ETH_FOREACH_DEV(port) {
         struct rte_ether_addr addr;
         if ( rte_eth_macaddr_get(port, &addr) < 0 ) {
@@ -430,7 +498,9 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         else
             continue;
 
-        if ( port_init(port, mbuf_pool) < 0 ) {
+        ports[port] = new port_data(port, mbuf_pool);
+
+        if ( port_init(*ports[port]) < 0 ) {
             rte_exit(1, "Couldn't initialize port %u\n", port);
         }
         printf("Initialized port %u\n", port);
@@ -457,6 +527,10 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     }
 
 cleanup:
+    delete conn_table;
+    for ( int i = 0; i < nb_ports; i++ ) {
+        if ( ports[i] != nullptr ) delete ports[i];
+    }
     if ( rte_eth_dev_stop(int_port) != 0 )
         rte_exit(1, "Couldn't stop internal port");
     if ( rte_eth_dev_stop(ext_port) != 0 )
