@@ -332,10 +332,8 @@ ret:
  * @param logger logger instance to log packet decisions into.
  * @param conn_table connection table to consult if packet is TCP and has ACK=1.
  */
-pkt_dc query_decision_and_log(struct rte_mbuf &pkt, struct ruletable &ruletable,
-                              direction pkt_direction, log_list &logger,
+pkt_dc query_decision_and_log(const pkt_props pkt_props, struct ruletable &ruletable, log_list &logger,
                               conn_table &conn_table) {
-    pkt_props     pkt_props = extract_pkt_props(pkt, pkt_direction);
     bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
     bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
     bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
@@ -397,10 +395,10 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
         nb_pkts_tx_total = 0;
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
               recv_pkt_idx++ ) {
-            if ( query_decision_and_log(*recv_burst[recv_pkt_idx], ruletable,
-                                        direction, logger,
-                                        conn_table) == PKT_PASS ) {
                 struct rte_mbuf *pkt = recv_burst[recv_pkt_idx];
+				pkt_props props = extract_pkt_props(*pkt, direction);
+            if ( query_decision_and_log(props, ruletable, logger,
+                                        conn_table) == PKT_PASS ) {
                 send_burst[nb_pkts_tx_total++] = pkt;
             }
         }
