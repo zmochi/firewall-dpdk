@@ -14,10 +14,6 @@ cflags = -std=c++17 -MMD -MP
 fw_cflags = 
 interface_cflags = 
 
--include $(wildcard $(OBJ_DIR)/**/*.d)
-# for some reason above wildcard doesn't include files directly in OBJ_DIR
--include $(wildcard $(OBJ_DIR)/*.d)
-
 fw_cdeps = \
 	main.cpp \
 	fw_dpdk.cpp \
@@ -69,3 +65,7 @@ directories: $(DIRS)
 
 $(DIRS):
 	mkdir -p $@
+
+-include $(wildcard $(OBJ_DIR)/**/*.d)
+# for some reason above wildcard doesn't include files directly in OBJ_DIR
+-include $(wildcard $(OBJ_DIR)/*.d)

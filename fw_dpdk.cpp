@@ -4,7 +4,9 @@
 #include <rte_mbuf.h>
 #include <rte_memory.h>
 #include <signal.h>
+#include <stdexcept>
 
+#include <iostream>
 // libntoh/tcpreassembly.h is missing `extern "C"`, so need to wrap it
 extern "C" {
 #include <libntoh/libntoh.h>
@@ -22,44 +24,51 @@ struct rte_ether_hdr *get_eth_hdr(struct rte_mbuf *pkt) {
 }
 
 char *get_ethhdr_data(struct rte_mbuf *pkt) {
-    return (char*)get_eth_hdr(pkt) + ethhdr_size;
+    return (char *)get_eth_hdr(pkt) + ethhdr_size;
 }
 
 char *get_ipv4hdr_data(struct rte_mbuf *pkt) {
     auto  *iphdr = (struct rte_ipv4_hdr *)get_ethhdr_data(pkt);
-    size_t ipv4hdr_size = (iphdr->ihl) * 4;
+    size_t ipv4hdr_size = (iphdr->ihl & 0x0F) * 4;
+	if(ipv4hdr_size < 20 || ipv4hdr_size > 60) {
+		std::cout << "Bad ipv4hdr_size" << std::endl;
+	}
 
     return (char *)iphdr + ipv4hdr_size;
 }
 
 char *get_tcphdr_data(struct rte_mbuf *pkt) {
     auto  *tcp_hdr = (struct rte_tcp_hdr *)get_ipv4hdr_data(pkt);
-    size_t tcphdr_size = (tcp_hdr->data_off) * 4;
+    size_t tcphdr_size = ((tcp_hdr->data_off & 0xF0) >> 4) * 4;
+	if(tcphdr_size < 20 || tcphdr_size > 60) {
+		std::cout << "Bad tcphdr_size" << std::endl;
+	}
 
     return (char *)tcp_hdr + tcphdr_size;
 }
 
 static const uint16_t nb_rx_rings = 1, nb_tx_rings = 1;
 const int             MBUF_POOL_ELMS_PER_RING = 1024;
-static uint16_t       int_port, ext_port;
-volatile bool         force_quit;
-
+volatile bool         force_quit = false;
+int                   count = 0;
 struct port_data {
   private:
     /* inspired by example packet reassembly app
      * https://github.com/DPDK/dpdk/blob/main/examples/ip_reassembly/main.c
      * https://doc.dpdk.org/guides/sample_app_ug/ip_reassembly.html
      */
-    static constexpr uint32_t f_tbl_nb_buckets = UINT16_MAX;
+    static constexpr uint32_t f_tbl_nb_buckets = UINT16_MAX / 16;
     static constexpr uint32_t f_tbl_associativity = 16;
     static constexpr uint32_t f_tbl_max_entries = f_tbl_nb_buckets;
     static constexpr uint64_t f_tbl_max_cycles = UINT64_MAX;
 
   public:
     uint16_t                     port;
-    struct rte_mempool          *mempool;
-    struct rte_ip_frag_tbl      *ip_frag_tbl;
+    struct rte_mempool          *mempool = nullptr;
+    struct rte_ip_frag_tbl      *ip_frag_tbl = nullptr;
     struct rte_ip_frag_death_row dr;
+
+    port_data() : port(-1), mempool(nullptr), ip_frag_tbl(nullptr) {}
 
     port_data(uint16_t port, struct rte_mempool *mempool)
         : port(port), mempool(mempool) {
@@ -67,9 +76,15 @@ struct port_data {
         ip_frag_tbl = rte_ip_frag_table_create(
             f_tbl_nb_buckets, f_tbl_associativity, f_tbl_max_entries,
             f_tbl_max_cycles, SOCKET_ID_ANY);
+        if ( ip_frag_tbl == nullptr ) {
+            throw std::runtime_error(
+                "Couldn't initialize ip fragmentation table");
+        }
     }
 
-    ~port_data() { rte_ip_frag_table_destroy(ip_frag_tbl); }
+	void cleanup() {
+        if ( ip_frag_tbl != nullptr ) rte_ip_frag_table_destroy(ip_frag_tbl);
+	}
 };
 
 struct rte_mbuf *ipv4_reassemble(port_data &pdata, struct rte_mbuf *mbuf,
@@ -246,9 +261,8 @@ int init_sigint_handler() {
  *
  * @return the pkt_props struct instance.
  */
-#include <iostream>
 pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
-    struct pkt_props    pkt_props;
+    struct pkt_props pkt_props;
     pkt_props.direction = pkt_direction;
 
     struct rte_tcp_hdr *tcp_hdr = {};
@@ -267,7 +281,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
     if ( eff_pktlen < ethhdr_size ) {
         ERROR("Packet too small to contain ethernet header");
         pkt_props.eth_proto = ETHTYPE_NUL;
-		goto ret;
+        goto ret;
     }
     /*
      * there might be a better way to check packet types (ipv4, tcp, ...),
@@ -282,7 +296,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
         ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
         if ( eff_pktlen < ipv4hdr_size ) {
             pkt_props.eth_proto = ETHTYPE_NUL;
-			goto ret;
+            goto ret;
         }
         auto *ipv4_hdr = (struct rte_ipv4_hdr *)get_ethhdr_data(&pkt);
 
@@ -296,7 +310,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
             tcphdr_size = get_tcphdr_data(&pkt) - get_ipv4hdr_data(&pkt);
             if ( eff_pktlen < tcphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
-				goto ret;
+                goto ret;
             }
             pkt_props.proto = TCP;
             tcp_hdr = (struct rte_tcp_hdr *)get_ipv4hdr_data(&pkt);
@@ -309,7 +323,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
         } else if ( ipv4_hdr->next_proto_id == IPPROTO_UDP ) {
             if ( eff_pktlen < udphdr_size ) {
                 pkt_props.proto = NUL_PROTO;
-				goto ret;
+                goto ret;
             }
             pkt_props.proto = UDP;
             auto *udp_hdr = (struct rte_udp_hdr *)get_ipv4hdr_data(&pkt);
@@ -324,6 +338,26 @@ ret:
     return pkt_props;
 }
 
+uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
+                        struct rte_mbuf **outgoing_pkts,
+                        const uint16_t    outoging_pkts_cap,
+                        const uint64_t    timestamp) {
+    uint16_t pkt_cnt = 0;
+    if ( get_eth_hdr(pkt)->ether_type == ETHTYPE_IPV4 && rte_ipv4_frag_pkt_is_fragmented((struct rte_ipv4_hdr*)get_ethhdr_data(pkt))) {
+		printf("got fragmented packet\n");
+        // ipv4_reassemble either returns null (and "saves" the passed packet
+        // for later) or returns the reassembled packet.
+        outgoing_pkts[0] = ipv4_reassemble(
+            pdata, pkt, (struct rte_ipv4_hdr *)get_ethhdr_data(pkt), timestamp);
+        if ( outgoing_pkts[0] != nullptr ) {pkt_cnt++; printf("reassembled packet!\n");}
+    } else {
+        outgoing_pkts[0] = pkt;
+        pkt_cnt++;
+    }
+
+    return pkt_cnt;
+}
+
 /* @brief receive a packet and make a decision whether to drop or pass the
  * packet.
  * @param pkt packet to make decision on.
@@ -332,7 +366,8 @@ ret:
  * @param logger logger instance to log packet decisions into.
  * @param conn_table connection table to consult if packet is TCP and has ACK=1.
  */
-pkt_dc query_decision_and_log(const pkt_props pkt_props, struct ruletable &ruletable, log_list &logger,
+pkt_dc query_decision_and_log(const pkt_props   pkt_props,
+                              struct ruletable &ruletable, log_list &logger,
                               conn_table &conn_table) {
     bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
     bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
@@ -366,7 +401,8 @@ pkt_dc query_decision_and_log(const pkt_props pkt_props, struct ruletable &rulet
  * @param out_port DPDK port number of external network NIC.
  */
 int firewall_loop(ruletable &ruletable, log_list &logger,
-                  conn_table &conn_table, uint16_t in_port, uint16_t out_port) {
+                  conn_table &conn_table, port_data &in_pdata,
+                  port_data &out_pdata) {
     /*
      * 1. receive RX_BURST_SIZE packets (and store pointers to them in
      * recv_burst[]) using rte_eth_rx_burst()
@@ -375,31 +411,54 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
      * 3. send all packets from send_burst[] with rte_eth_tx_burst()
      */
     uint16_t nb_pkts_rx = 0, nb_pkts_tx = 0, nb_pkts_tx_total = 0;
+    uint16_t nb_ret_pkts = 0;
     /* how many packets to receive/transmit at once from NIC */
     constexpr auto   RX_BURST_SIZE = 10;
     struct rte_mbuf *recv_burst[RX_BURST_SIZE];
     struct rte_mbuf *send_burst[RX_BURST_SIZE];
+    // array for "returning" packets (e.g packets from TCP reassembly), used by
+    // pre_query_hook so its able to return more than 1 packet to be sent.
+    struct rte_mbuf *send_returning[RX_BURST_SIZE];
 
-    int       rx_port = in_port, tx_port = out_port;
-    direction direction = OUT;
+    uint16_t in_port = in_pdata.port, out_port = out_pdata.port;
+    // rx - receive, tx - transmit
+    port_data *rx_pdata = &in_pdata;
+    int        rx_port = in_port, tx_port = out_port;
+    direction  direction = OUT;
 
     while ( !force_quit ) {
         /* switches between in_port and out_port, forwarding packets in both
          * directions in alternating order */
+        rx_pdata = (port_data *)((uintptr_t)rx_pdata ^ ((uintptr_t)&in_pdata ^
+                                                        (uintptr_t)&out_pdata));
         rx_port ^= (in_port ^ out_port);
         tx_port ^= (in_port ^ out_port);
         direction = static_cast<enum direction>(direction ^ (OUT ^ IN));
 
-        nb_pkts_rx = rte_eth_rx_burst(rx_port, 0, recv_burst, RX_BURST_SIZE);
+        struct rte_mbuf *pkt;
+        uint64_t         timestamp = rte_rdtsc();
 
+        nb_pkts_rx = rte_eth_rx_burst(rx_port, 0, recv_burst, RX_BURST_SIZE);
         nb_pkts_tx_total = 0;
+        nb_ret_pkts = 0;
+
         for ( int recv_pkt_idx = 0; recv_pkt_idx < nb_pkts_rx;
               recv_pkt_idx++ ) {
-                struct rte_mbuf *pkt = recv_burst[recv_pkt_idx];
-				pkt_props props = extract_pkt_props(*pkt, direction);
-            if ( query_decision_and_log(props, ruletable, logger,
-                                        conn_table) == PKT_PASS ) {
-                send_burst[nb_pkts_tx_total++] = pkt;
+            // Pass the packet to the function - `pkt` should not be used
+            // anymore.
+            nb_ret_pkts = pre_query_hook(*rx_pdata, recv_burst[recv_pkt_idx],
+                                         &send_returning[nb_ret_pkts],
+                                         RX_BURST_SIZE, timestamp);
+
+            for ( int i = 0; i < nb_ret_pkts; i++ ) {
+                pkt = send_returning[i];
+                pkt_props props = extract_pkt_props(*pkt, direction);
+                if ( query_decision_and_log(props, ruletable, logger,
+                                            conn_table) == PKT_PASS ) {
+                    send_burst[nb_pkts_tx_total++] = pkt;
+                } else {
+                    rte_pktmbuf_free(pkt);
+                }
             }
         }
 
@@ -457,7 +516,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     argc -= ret;
     argv += ret;
 
-	/* create global DPDK memory pool */
+    /* create global DPDK memory pool */
     mbuf_pool = rte_pktmbuf_pool_create(
         "packet_pool",
         (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING * 2,
@@ -472,12 +531,13 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
      * matches internal/external port MACs given in function parameters, set
      * int_port/ext_port to its matching DPDK port number.
      */
-    auto nb_ports = rte_eth_dev_count_avail();
     /* sentinel values to indicate failure */
-    int_port = 0xFFFF, ext_port = 0xFFFF;
     /* NIC to initialize */
+
     uint16_t   port;
-    port_data *ports[nb_ports];
+    port_data *pdata = nullptr;
+    port_data  int_port(-1, mbuf_pool);
+    port_data  ext_port(-1, mbuf_pool);
     RTE_ETH_FOREACH_DEV(port) {
         struct rte_ether_addr addr;
         if ( rte_eth_macaddr_get(port, &addr) < 0 ) {
@@ -489,16 +549,16 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
                                        addr.addr_bytes[2], addr.addr_bytes[3],
                                        addr.addr_bytes[4], addr.addr_bytes[5]);
 
-        if ( port_maddr == in_mac )
-            int_port = port;
-        else if ( port_maddr == out_mac )
-            ext_port = port;
-        else
+        if ( port_maddr == in_mac ) {
+            int_port.port = port;
+            pdata = &int_port;
+        } else if ( port_maddr == out_mac ) {
+            ext_port.port = port;
+            pdata = &ext_port;
+        } else
             continue;
 
-        ports[port] = new port_data(port, mbuf_pool);
-
-        if ( port_init(*ports[port]) < 0 ) {
+        if ( port_init(*pdata) < 0 ) {
             rte_exit(1, "Couldn't initialize port %u\n", port);
         }
         printf("Initialized port %u\n", port);
@@ -506,33 +566,32 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
 
     conn_table *conn_table = new class conn_table();
 
-    if ( int_port == 0xFFFF ) {
+    if ( int_port.port == (uint16_t)(-1) ) {
         ERROR("Port with specified internal MAC address not found");
         goto cleanup;
     }
 
-    if ( ext_port == 0xFFFF ) {
+    if ( ext_port.port == (uint16_t)(-1) ) {
         ERROR("Port with specified external MAC address not found");
         goto cleanup;
     }
 
     /* main firewall loop. force_quit is used to stop the firewall loop when
      * Ctrl+C is pressed (see sigint_handler()). */
-    force_quit = false;
     if ( firewall_loop(rt, logger, *conn_table, int_port, ext_port) < 0 ) {
         ERROR("Couldn't execute firewall_loop()");
         goto cleanup;
     }
 
 cleanup:
-    delete conn_table;
-    for ( int i = 0; i < nb_ports; i++ ) {
-        if ( ports[i] != nullptr ) delete ports[i];
-    }
-    if ( rte_eth_dev_stop(int_port) != 0 )
+    if ( rte_eth_dev_stop(int_port.port) != 0 )
         rte_exit(1, "Couldn't stop internal port");
-    if ( rte_eth_dev_stop(ext_port) != 0 )
+    if ( rte_eth_dev_stop(ext_port.port) != 0 )
         rte_exit(1, "Couldn't stop external port");
+
+	// must free ip_frag_tbl before rte_eal_cleanup, or get segfault
+	int_port.cleanup();
+	ext_port.cleanup();
 
     if ( rte_eal_cleanup() < 0 ) {
         ERROR("error on releasing resources\n");
