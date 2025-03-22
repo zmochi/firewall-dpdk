@@ -1,40 +1,10 @@
 #include "filter.hpp"
-#include "SimilarityMatcher.hpp"
+#include "C_CodeMatcher.hpp"
 #include "http_parser.hpp"
 
 #include <cstring>
-#include <string>
 
-static std::string c_similarities[] = {
-    "#ifdef",       "#ifndef",  "void main(int argc, char* argv[])",
-    "#define",      "typedef",  "char *",
-    "int *",        "char*",    "int*",
-    "int",          "char",     "size_t",
-    "return NULL;", "#include", "stdio.h",
-    "stdlib.h"};
-
-static SimilarityMatcher c_code_matcher(c_similarities,
-                                        sizeof(c_similarities) /
-                                            sizeof(c_similarities[0]));
-
-#include <iostream>
-static score_t filter_handle_http(const char *request, size_t size) {
-    http_parsed_req req = http_parse_request(request, size);
-	if(req.metadata_len < 0) {
-		// couldn't parse request, so filter it
-		return MAX_SCORE;
-	}
-    // TODO: recognize method without parsing entire request?
-    if ( req.method != M_POST ) {
-        // 0 should always pass
-        return 0;
-    }
-
-    static_assert(sizeof(*request) == sizeof(char));
-    score_t score = c_code_matcher.match(request + req.metadata_len, size);
-
-    return score;
-}
+C_CodeMatcher c_matcher;
 
 static bool is_http_request(const char *str, size_t size) {
     const char *ch = str;
@@ -58,22 +28,17 @@ static bool is_http_request(const char *str, size_t size) {
     return res;
 }
 
-static bool is_smtp(const char *tcp_data, size_t size) { return false; }
-
-#include <iostream>
 filter_dc filter_c_code(char *pkt_tcp_data, size_t size) {
     constexpr score_t passing_score = 20;
-    score_t           score;
+    score_t           score = 0;
     char             *data;
     size_t            data_size;
 
-    // TODO: separate HTTP request and responses, filter indepedently
-    if ( is_http_request(pkt_tcp_data, size) ) {
-        score = filter_handle_http(pkt_tcp_data, size);
-    } else if ( is_smtp(pkt_tcp_data, size) ) {
-        std::cout << "Not implemented" << std::endl;
-        return FILTER_DROP;
-    }
+	std::string_view text(pkt_tcp_data, size);
+	score = c_matcher.match(text);
+
+	printf("Text:\n%.*s\n", (int)size, pkt_tcp_data);
+	printf("Score = %d\n", score);
 
     if ( score >= passing_score ) {
         return FILTER_DROP;

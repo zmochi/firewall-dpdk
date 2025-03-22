@@ -16,5 +16,5 @@ public:
 	C_CodeMatcher();
 	~C_CodeMatcher();
 
-	score_t match(const std::string& text);
+	score_t match(const std::string_view text);
 };

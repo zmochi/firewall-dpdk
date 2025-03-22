@@ -385,12 +385,11 @@ pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
     bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
     bool           do_filter =
         pkt_props.direction == OUT && is_tcp && has_ack &&
-        (pkt_props.daddr == http_port_be || pkt_props.daddr == smtp_port_be);
+        (pkt_props.dport == http_port_be || pkt_props.dport == smtp_port_be);
     decision_info dc;
 
-    uint16_t ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
-    uint16_t tcphdr_size = get_tcphdr_data(&pkt) - get_ipv4hdr_data(&pkt);
     if ( do_filter ) {
+		//printf("tcp_data:\n%.40s", get_tcphdr_data(&pkt));
         filter_dc f_dc =
             filter_cb(get_tcphdr_data(&pkt),
                       rte_pktmbuf_pkt_len(&pkt) -
@@ -560,11 +559,11 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
      * matches internal/external port MACs given in function parameters, set
      * int_port/ext_port to its matching DPDK port number.
      */
-    /* sentinel values to indicate failure */
-    /* NIC to initialize */
 
+    /* NIC to initialize */
     uint16_t   port;
     port_data *pdata = nullptr;
+    /* -1 is sentinel value to indicate failure */
     port_data  int_port(-1, mbuf_pool);
     port_data  ext_port(-1, mbuf_pool);
     RTE_ETH_FOREACH_DEV(port) {
