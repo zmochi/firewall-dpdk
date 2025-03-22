@@ -44,7 +44,7 @@ DPDK_OBJS = fw_dpdk.cpp
 
 all: libs directories $(FW_EXE) $(IFACE_EXE)
 
-debug: cflags += -g -O0
+debug: cflags += -g -O0 -DDEBUG
 debug: all
 
 PCRE2_build_dir = external/PCRE2.build
