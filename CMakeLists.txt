@@ -1,6 +1,7 @@
 set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 cmake_minimum_required(VERSION 3.10)
-project(firewall CXX)
+project(firewall)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,11 +9,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DPDK REQUIRED libdpdk)
 
+set(EXTERNAL_LIBS_DIR external)
+set(INTERFACE_DIR ${CMAKE_SOURCE_DIR}/interfaces)
+
 set(PCRE2_build_dir ${CMAKE_SOURCE_DIR}/external/PCRE2.build)
 set(PCRE2_INCLUDE_DIR ${PCRE2_build_dir})
 set(PCRE2_LIBRARIES ${PCRE2_build_dir}/libpcre2-8.a)
 
-set(INTERFACE_DIR ${CMAKE_SOURCE_DIR}/interfaces)
+set(LWIP_DIR ${EXTERNAL_LIBS_DIR}/lwip)
+set(LWIP_OPTS_DIR ${EXTERNAL_LIBS_DIR})
+include(lwip.cmake)
+
 set(INTERFACE_SOURCES
 	${INTERFACE_DIR}/interface_main.cpp
 	${INTERFACE_DIR}/interface_main.cpp 
@@ -42,7 +49,7 @@ set(FW_SOURCES
 )
 
 add_custom_target(external_libs
-	COMMAND make -C external
+	COMMAND make -C ${CMAKE_SOURCE_DIR}/external
 	COMMENT "Building external dependencies"
 )
 
@@ -51,9 +58,11 @@ target_compile_options(dpdk_objs PRIVATE ${DPDK_CFLAGS})
 
 add_executable(fw ${FW_SOURCES})
 target_include_directories(fw PRIVATE ${CMAKE_SOURCE_DIR} ${DPDK_INCLUDE_DIRS})
-target_link_libraries(fw PRIVATE ${DPDK_LIBRARIES} ${PCRE2_LIBRARIES} $<TARGET_OBJECTS:dpdk_objs>)
+add_dependencies(fw external_libs)
+target_link_libraries(fw PRIVATE ${DPDK_LIBRARIES} ${PCRE2_LIBRARIES} $<TARGET_OBJECTS:dpdk_objs> lwip)
 
 add_executable(main ${INTERFACE_SOURCES})
+add_dependencies(main external_libs)
 target_include_directories(main PRIVATE ${CMAKE_SOURCE_DIR})
 
 option(DEBUG_BUILD "Build with debug flags -g -O0 -DDEBUG" OFF)
