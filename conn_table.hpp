@@ -18,7 +18,7 @@ enum state_t {
     TWH_SYN_ACK_RECEIVED,
     TWH_SYN_ACK_SENT,
     TWH_ACK_RECEIVED,
-    ESTABLISHED,
+    CONN_ESTABLISHED,
     /* fin sent only */
     FIN_SENT,
     /* fin sent and acked */
@@ -41,6 +41,8 @@ struct conn_table_entry {
     /* (TODO) current or initial (TODO) client/server sequence numbers */
     seq_t server_seq;
     seq_t client_seq;
+
+	void* user_arg = nullptr;
 
     /* empty constructor to be able to assign entries[conn_table_entry] =
      * entry_instance*/
@@ -112,7 +114,6 @@ class conn_table {
         entries;
 
   public:
-
     conn_table() : entries() {}
 
     decision_info tcp_new_conn(pkt_props props, decision_info static_rt_dc);

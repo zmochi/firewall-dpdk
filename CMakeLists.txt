@@ -45,6 +45,7 @@ set(FW_SOURCES
 	interfaces/ruletable_server.cpp 
 	fnv_hash.cpp 
 	conn_table.cpp 
+	MITM/setup.cpp
 	${DLP_SOURCES}
 )
 
@@ -67,7 +68,9 @@ target_include_directories(main PRIVATE ${CMAKE_SOURCE_DIR})
 
 option(DEBUG_BUILD "Build with debug flags -g -O0 -DDEBUG" OFF)
 if(DEBUG_BUILD)
+	set(CMAKE_BUILD_TYPE Debug)
 	target_compile_definitions(fw PRIVATE DEBUG)
+	target_compile_definitions(lwip INTERFACE LWIP_DEBUG)
 	target_compile_options(fw PRIVATE -g -O0)
 	target_compile_definitions(main PRIVATE DEBUG)
 	target_compile_options(main PRIVATE -g -O0)

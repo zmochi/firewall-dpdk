@@ -59,10 +59,10 @@ static conn_action_t advance_client_state(conn_table_entry &entry,
 				std::cout << "Impossible scenario!" << std::endl;
 				return BAD_PKT;
 			}
-			entry.client_state = ESTABLISHED;
-			entry.server_state = ESTABLISHED;
+			entry.client_state = CONN_ESTABLISHED;
+			entry.server_state = CONN_ESTABLISHED;
 			break;
-        case ESTABLISHED:
+        case CONN_ESTABLISHED:
             if ( PKT_FIN ) {
                 entry.client_state = FIN_SENT;
                 entry.client_fin = props.seq_nb;
@@ -125,7 +125,7 @@ static conn_action_t advance_server_state(conn_table_entry &entry,
             /* re-transmission of SYN/ACK */
             //server_reorder.init_seq(props.seq_nb);
             break;
-        case ESTABLISHED:
+        case CONN_ESTABLISHED:
             if ( PKT_FIN ) {
                 entry.server_state = FIN_SENT;
                 entry.server_fin = props.seq_nb;

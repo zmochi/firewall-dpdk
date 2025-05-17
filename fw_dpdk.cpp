@@ -7,12 +7,8 @@
 #include <stdexcept>
 
 #include <iostream>
-// libntoh/tcpreassembly.h is missing `extern "C"`, so need to wrap it
-extern "C" {
-#include <libntoh/libntoh.h>
-#include <libntoh/tcpreassembly.h>
-}
 
+#include "MITM/setup.hpp"
 #include "utils.h"
 
 static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
@@ -369,6 +365,33 @@ constexpr be32_t http_port_be = 0x5000;
 // SMTP port 25 in big endian
 constexpr be32_t smtp_port_be = 0x1900;
 
+MITM mitm;
+
+class MITM_client {
+  public:
+    uint16_t                      port;
+    struct netconn               *listen_socket;
+    std::vector<struct netconn *> connections;
+    char                         *data_buf = nullptr;
+    size_t                        data_buf_len = 0;
+    MITM_client(uint16_t port)
+        : port(port), data_buf(new char[1 << 12]), data_buf_len(1 << 12) {
+        listen_socket = mitm.socket();
+		if(listen_socket == nullptr) {
+			std::cout << "listen_socket is null" << std::endl;
+		}
+
+        if ( mitm.bind(listen_socket, 80) != OK )
+            throw std::runtime_error("Couldn't bind socket");
+        if ( mitm.listen(listen_socket, 20) != OK )
+            throw std::runtime_error("Couldn't listen on socket");
+    }
+
+    void recv_all_conns() {
+        for ( struct netconn *conn : connections ) {}
+    }
+};
+
 /* @brief receive a packet and make a decision whether to drop or pass the
  * packet.
  * @param pkt packet to make decision on.
@@ -380,35 +403,29 @@ constexpr be32_t smtp_port_be = 0x1900;
 pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
                               struct ruletable &ruletable, log_list &logger,
                               conn_table &conn_table, filter_fn filter_cb) {
-    bool          is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
-    bool          is_tcp = is_ipv4 && pkt_props.proto == IPPROTO_TCP;
-    bool          has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
-    bool           do_filter =
-        pkt_props.direction == OUT && is_tcp && has_ack &&
+    bool is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
+    bool is_tcp = pkt_props.proto == IPPROTO_TCP;
+    bool has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
+    bool do_filter =
+        is_ipv4 && is_tcp &&
         (pkt_props.dport == http_port_be || pkt_props.dport == smtp_port_be);
     decision_info dc;
+    decision_info ruletable_dc = ruletable.query(&pkt_props, PKT_DROP);
 
-    if ( do_filter ) {
-		//printf("tcp_data:\n%.40s", get_tcphdr_data(&pkt));
-        filter_dc f_dc =
-            filter_cb(get_tcphdr_data(&pkt),
-                      rte_pktmbuf_pkt_len(&pkt) -
-                          (get_tcphdr_data(&pkt) - (char *)get_eth_hdr(&pkt)));
-        if ( f_dc == FILTER_DROP ) {
-            dc.decision = PKT_DROP;
-            dc.reason = REASON_FILTER;
-			goto log;
-        }
-    }
-
-	if ( is_tcp && has_ack ) {
+    if ( is_tcp && has_ack ) {
         dc = conn_table.tcp_existing_conn(pkt_props);
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
-        if ( is_tcp && dc.decision != PKT_DROP ) {
+        if ( is_tcp && dc.decision == PKT_PASS ) {
             dc = conn_table.tcp_new_conn(pkt_props, dc);
         }
+    }
+
+    if ( do_filter && dc.decision == PKT_PASS ) {
+        mitm.tx_ip_datagram(get_ethhdr_data(&pkt),
+                            rte_pktmbuf_pkt_len(&pkt) - ethhdr_size);
+        return PKT_DROP;
     }
 
 log:
@@ -419,14 +436,20 @@ log:
     return dc.decision;
 }
 
+void                             tmp_cb(void *a, void *b) {}
+template <typename Deleter> void mitm_dpdk_free_cb(void *addr, void *arg) {
+    auto &deleter = *static_cast<Deleter *>(arg);
+    deleter(addr);
+}
+
 /* @brief main DPDK loop that extracts packets, calls query_decision_and_log()
  * on each packet, and transmits the packet if the decision is PKT_PASS.
- *
+
  * @param ruletable ruletable to pass to query_decision_and_log.
  * @param logger log instance to pass to query_decision_and_log.
  * @param conn_table connection table to pass to query_decision_and_log.
- * @param in_port DPDK port number of internal network NIC.
- * @param out_port DPDK port number of external network NIC.
+ * @param in_pdata DPDK port data of internal network NIC.
+ * @param out_pdata DPDK port data of external network NIC.
  */
 int firewall_loop(ruletable &ruletable, log_list &logger,
                   conn_table &conn_table, port_data &in_pdata,
@@ -474,20 +497,65 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
               recv_pkt_idx++ ) {
             // Pass the packet to the function - `pkt` should not be used
             // anymore.
-            nb_ret_pkts = pre_query_hook(*rx_pdata, recv_burst[recv_pkt_idx],
-                                         &send_returning[nb_ret_pkts],
-                                         RX_BURST_SIZE, timestamp);
+            nb_ret_pkts =
+                pre_query_hook(*rx_pdata, recv_burst[recv_pkt_idx],
+                               &send_returning[nb_ret_pkts],
+                               RX_BURST_SIZE - nb_ret_pkts, timestamp);
 
             for ( int i = 0; i < nb_ret_pkts; i++ ) {
                 pkt = send_returning[i];
                 pkt_props props = extract_pkt_props(*pkt, direction);
                 if ( query_decision_and_log(*pkt, props, ruletable, logger,
-                                            conn_table, filter_c_code) == PKT_PASS ) {
+                                            conn_table,
+                                            filter_c_code) == PKT_PASS ) {
                     send_burst[nb_pkts_tx_total++] = pkt;
                 } else {
                     rte_pktmbuf_free(pkt);
                 }
             }
+        }
+
+        MITM_client client(80);
+        mitm.make_socket_nonblocking(client.listen_socket);
+        struct netconn *conn = nullptr;
+        if ( mitm.accept(client.listen_socket, &conn) != OK )
+            ERROR("whoops on accept()");
+        if ( conn != nullptr ) {
+            client.connections.push_back(conn);
+            conn = nullptr;
+        }
+        for ( auto active_conn : client.connections ) {
+            ssize_t actual_len =
+                mitm.recv(active_conn, client.data_buf, client.data_buf_len);
+            if ( actual_len < 0 ) {
+                ERROR("whoops on recv");
+                continue;
+            }
+            client.data_buf[actual_len] = '\0';
+            printf("received:\n%s", client.data_buf);
+            mitm.send(active_conn, client.data_buf, actual_len);
+        }
+
+        struct rte_mbuf *mitm_send_burst[RX_BURST_SIZE];
+        int              mitm_nb_pkts_tx_total = 0;
+        size_t           mitm_buflen = 0;
+        for ( int i = 0; i < RX_BURST_SIZE; i++ ) {
+            auto buf_uptr = mitm.rx_ip_datagram(&mitm_buflen);
+            if ( buf_uptr == nullptr ) break;
+            struct rte_mbuf *mbuf = rte_pktmbuf_alloc(out_pdata.mempool);
+            rte_pktmbuf_reset_headroom(mbuf);
+            if ( rte_pktmbuf_data_len(mbuf) < mitm_buflen ) {
+                ERROR("pktmbuf data_len smaller than MITM buffer len");
+                return -1;
+            }
+            memcpy(rte_pktmbuf_mtod(mbuf, void *), buf_uptr.release(),
+                   mitm_buflen);
+            mitm_send_burst[mitm_nb_pkts_tx_total++] = mbuf;
+        }
+        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst,
+                                      mitm_nb_pkts_tx_total);
+        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_tx_total; i++ ) {
+            rte_pktmbuf_free(mitm_send_burst[i]);
         }
 
         /* rte_eth_tx_burst() is responsible for freeing sent packets */
@@ -548,8 +616,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     mbuf_pool = rte_pktmbuf_pool_create(
         "packet_pool",
         (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING * 2,
-        0 /* setting cache_size to 0 disables this feature */, 0, 1024,
-        SOCKET_ID_ANY);
+        0 /* setting cache_size to 0 disables this feature */, 0,
+        MITM_MAX_EGRESS_DATAGRAM_SIZE, SOCKET_ID_ANY);
     if ( mbuf_pool == NULL ) {
         rte_exit(1, "Couldn't create pktmbuf_pool");
     }
@@ -564,8 +632,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     uint16_t   port;
     port_data *pdata = nullptr;
     /* -1 is sentinel value to indicate failure */
-    port_data  int_port(-1, mbuf_pool);
-    port_data  ext_port(-1, mbuf_pool);
+    port_data int_port(-1, mbuf_pool);
+    port_data ext_port(-1, mbuf_pool);
     RTE_ETH_FOREACH_DEV(port) {
         struct rte_ether_addr addr;
         if ( rte_eth_macaddr_get(port, &addr) < 0 ) {

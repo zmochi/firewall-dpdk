@@ -10,7 +10,7 @@ if [[ "$(whoami)" != "root" ]]; then
 fi
 
 modprobe vfio-pci
-$hugepages --setup 512MB
+$hugepages --setup 256MB
 
 for iface in ${interfaces[@]}; do
 	ip link set $iface down
