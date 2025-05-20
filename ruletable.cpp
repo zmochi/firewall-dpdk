@@ -1,6 +1,7 @@
 #include "ruletable.hpp"
 #include "utils.h"
 
+#include <netinet/in.h>
 #include <cstdlib>
 #include <fcntl.h>
 #include <mutex> /* for unique_lock */
@@ -89,8 +90,6 @@ bool cmp_proto(proto rule_proto, proto pkt_proto) {
 
     return rule_proto == pkt_proto;
 }
-
-#include <iostream>
 
 decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
     using namespace std;

@@ -2,6 +2,8 @@
 
 #include "../ruletable.hpp"
 
+int         parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
+                         be32_t *ipaddr_dest_mask);
 std::string fmt_ipaddr(be32_t ipaddr, uint32_t ipaddr_mask, bool add_mask);
 std::string fmt_port(be16_t port);
 std::unique_ptr<ruletable>

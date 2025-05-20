@@ -47,6 +47,7 @@ set(FW_SOURCES
 	conn_table.cpp 
 	MITM/setup.cpp
 	${DLP_SOURCES}
+	parsers/ruletable_parser.cpp
 )
 
 add_custom_target(external_libs

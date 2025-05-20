@@ -1,13 +1,14 @@
+#include <lwip/api.h>
 #include <lwip/netif.h>
 #include <lwip/pbuf.h>
 #include <lwip/prot/tcp.h>
+#include <lwip/sockets.h>
 #include <lwip/tcp.h>
 #include <lwip/tcpip.h>
 
 #include <stdexcept>
 #include <string.h>
 
-#include "lwip/api.h"
 #include "lwip/inet_chksum.h"
 #include "setup.hpp"
 
@@ -26,66 +27,65 @@ struct MITM_conn_data {
     be16_t            MITM_ext_port = 0;
 };
 
-struct netconn *MITM::socket() { return netconn_new(NETCONN_TCP); }
+int MITM::socket() { return lwip_socket(AF_INET, SOCK_STREAM, 0); }
 
-int MITM::make_socket_nonblocking(struct netconn *sock) {
-    netconn_set_nonblocking(sock, 1);
-    return OK;
+int MITM::make_socket_nonblocking(int sock) {
+	auto opt = lwip_fcntl(sock, F_GETFL, 0);
+	if(opt & O_NONBLOCK) {
+		return 0;
+	}
+	return lwip_fcntl(sock, F_SETFL, opt | O_NONBLOCK);
 }
 
 #include <iostream>
-int MITM::bind(struct netconn *socket, uint16_t port) {
-    err_t err;
-	const ip_addr_t addr = {.addr = netif_ip};
-    if ( (err = netconn_bind(socket, &addr, port)) != ERR_OK ) {
+int MITM::bind(int socket, uint16_t port) {
+    err_t              err;
+    int                yes = 1;
+    struct sockaddr_in local = {.sin_family = AF_INET,
+                                .sin_port = PP_HTONS(port),
+                                .sin_addr = {PP_HTONL(INADDR_ANY)}};
+    if ( lwip_setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) <
+         0 )
+        throw std::runtime_error("lwip_setsockopt()");
+
+    const ip_addr_t addr = {.addr = netif_ip};
+    if ( (err = lwip_bind(socket, (struct sockaddr *)&local, sizeof(local))) !=
+         ERR_OK ) {
         std::cout << "err: " << (int)err << std::endl;
         return ERR;
     }
     return OK;
 }
 
-int MITM::listen(struct netconn *socket, uint8_t backlog) {
-	err_t err;
-    if ( (err = netconn_listen_with_backlog(socket, backlog)) != ERR_OK ){std::cout<<"err " << __func__ << ":" << (int)err << std::endl; return ERR; }
-    return OK;
+int MITM::listen(int socket, uint8_t backlog) {
+	auto ret = lwip_listen(socket, backlog);
+	std::cout << "listen returned err = " << (int)ret << std::endl;
+	return ret;
 }
 
-int MITM::accept(struct netconn *listen_socket, struct netconn **new_sock) {
-    auto err = netconn_accept(listen_socket, new_sock);
-    if ( err != ERR_OK && err != ERR_WOULDBLOCK ){std::cout<<"err " << __func__ << ":" << (int)err << std::endl; return ERR; }
-    return OK;
+int MITM::accept(int listen_socket, struct sockaddr* addr, socklen_t *addrsize) {
+    return lwip_accept(listen_socket, addr, addrsize);
 }
 
-int MITM::close(struct netconn *socket) {
-    if ( netconn_close(socket) != ERR_OK ) return ERR;
-    return OK;
+int MITM::close(int socket) {
+	return lwip_close(socket);
 }
 
-int MITM::shutdown(struct netconn *socket, bool ingress, bool egress) {
-    if ( netconn_shutdown(socket, ingress, egress) != ERR_OK ) return ERR;
-    return OK;
+int MITM::shutdown(int socket, bool ingress, bool egress) {
+	int how = 0;
+	if(ingress) how = SHUT_RD;
+	if(egress) how = SHUT_WR;
+	if(ingress && egress) how = SHUT_RDWR;
+	return lwip_shutdown(socket, how);
 }
 
 // buffer points to where data should be copied, buf_cap holds buffer capacity
-ssize_t MITM::recv(struct netconn *socket, char *buffer, size_t buf_cap) {
-    size_t         nb_bytes_copied;
-    struct netbuf *buf;
-
-    // allocates a netbuf buffer with received data
-    if ( netconn_recv(socket, &buf) != ERR_OK ) return ERR;
-    // copy buf contents into user buffer
-    if ( (nb_bytes_copied = netbuf_copy(buf, buffer, buf_cap)) == 0 )
-        return ERR;
-
-    return nb_bytes_copied;
+ssize_t MITM::recv(int socket, char *buffer, size_t buf_cap) {
+     return lwip_recv(socket, buffer, buf_cap, 0);
 }
 
-ssize_t MITM::send(struct netconn *socket, char *src, size_t len) {
-    size_t bytes_written;
-    if ( netconn_write_partly(socket, src, len, 0, &bytes_written) != ERR_OK )
-        return ERR;
-    if ( bytes_written > SSIZE_MAX ) return ERR;
-    return bytes_written;
+ssize_t MITM::send(int socket, char *src, size_t len) {
+	return lwip_send(socket, src, len, 0);
 }
 
 static uint8_t get_ipv4hdr_size(ip_hdr *iphdr) {
@@ -106,7 +106,7 @@ static void fix_tcp_checksum(struct pbuf *p, ip_hdr *iphdr) {
     if ( p->payload != iphdr )
         throw std::runtime_error("p->payload != iphdr, assumption broken");
 
-    tcp_pbuf.payload = iphdr;
+    tcp_pbuf.payload = get_ipv4hdr_data(iphdr);
     tcp_pbuf.tot_len -= get_ipv4hdr_size(iphdr);
     tcp_pbuf.len -= get_ipv4hdr_size(iphdr);
     const ip4_addr_t src = {.addr = iphdr->src.addr};
@@ -120,17 +120,23 @@ static void fix_tcp_checksum(struct pbuf *p, ip_hdr *iphdr) {
     }
 
     tcp_hdr *tcphdr = static_cast<tcp_hdr *>(get_ipv4hdr_data(iphdr));
+	tcphdr->chksum = 0;
     tcphdr->chksum = inet_chksum_pseudo(
-        &tcp_pbuf, IPPROTO_TCP, ntohs(iphdr->_len) - (iphdr->_v_hl << 2), &src,
+        &tcp_pbuf, IPPROTO_TCP, tcp_pbuf.tot_len, &src,
         &dest);
+}
+
+static uint16_t calc_ipv4_checksum(ip_hdr*iphdr) {
+    return inet_chksum(iphdr, IPH_HL_BYTES(iphdr));
 }
 
 static void fix_ipv4_checksum(ip_hdr *iphdr) {
     IPH_CHKSUM_SET(iphdr, 0);
-    IPH_CHKSUM_SET(iphdr, inet_chksum(iphdr, lwip_ntohs(IPH_LEN(iphdr))));
+    IPH_CHKSUM_SET(iphdr, calc_ipv4_checksum(iphdr));
 }
 
 err_t outgoing_hook(netif *netif, pbuf *p, const ip4_addr_t *ip_dest) {
+	LOG("outgoing_hook");
     MITM            &instance = *((MITM *)netif->state);
     ip_hdr          *pbuf_iphdr = (ip_hdr *)p->payload;
     const ip4_addr_t src = {.addr = pbuf_iphdr->src.addr};
@@ -172,13 +178,11 @@ err_t outgoing_hook(netif *netif, pbuf *p, const ip4_addr_t *ip_dest) {
 // note: network byte order
 #define IP4(a, b, c, d) PP_HTONL(LWIP_MAKEU32(a, b, c, d))
 
-err_t netif_init_func(struct netif *netif) {
-    return ERR_OK;
-}
+err_t netif_init_func(struct netif *netif) { return ERR_OK; }
 
 MITM::MITM()
     : netif(new struct netif), netif_ip(IP4(8, 8, 8, 8)),
-      netif_netmask(IP4(255, 255, 255, 255)) {
+      netif_netmask(IP4(0, 0, 0, 0)) {
     // MITM is singleton since (currently) 127.0.0.1 is assigned statically, but
     // we can't have 2 netif's with the same IP address. also possible issue
     // with xxxx_init() being called multiple times.
@@ -195,6 +199,7 @@ MITM::MITM()
 
     netif.get()->output = outgoing_hook;
     netif_set_default(netif.get());
+	netif_set_link_up(netif.get());
     netif_set_up(netif.get());
     UNLOCK_TCPIP_CORE();
 }
@@ -220,6 +225,7 @@ MITM::~MITM() {
  */
 void MITM::new_conn(uint32_t src_ip, uint32_t dest_ip, uint16_t src_port,
                     uint16_t dest_port) {
+	LOG("adding entry: src_ip = %u, dest_ip = %u, src_port = %d, dest_port = %d", src_ip, dest_ip, src_port, dest_port);
     auto entry1 = conn_table_entry(src_ip, 0, src_port, 0);
     auto entry2 = conn_table_entry(dest_ip, 0, dest_port, 0);
     auto entry3 = conn_table_entry(src_ip, src_port, dest_ip, dest_port);
@@ -228,10 +234,15 @@ void MITM::new_conn(uint32_t src_ip, uint32_t dest_ip, uint16_t src_port,
                                          .src_port = src_port,
                                          .dest_port = dest_port};
     conntable.add_entry(entry3);
-    entry1.user_arg = conntable.lookup_entry(entry3);
-    entry2.user_arg = conntable.lookup_entry(entry3);
+	// worst code i've written in my life.
+	// mem released at conn_table_entry destructor.
+    entry1.user_arg = new conn_table_entry(entry3);
+    entry2.user_arg = new conn_table_entry(entry3);
     conntable.add_entry(entry1);
     conntable.add_entry(entry2);
+	entry1.user_arg = nullptr;
+	entry2.user_arg = nullptr;
+	entry3.user_arg = nullptr;
 }
 
 /*
@@ -243,6 +254,7 @@ MITM_conn_data *MITM::lookup_conn(be32_t src_ip, be32_t dest_ip,
     auto entry = conn_table_entry(src_ip, dest_ip, src_port, dest_port);
     // entry that is inserted with full original connection tuple (src_ip,
     // src_port, dest_ip, dest_port), no zero fillers
+	LOG("looking up: src_ip = %u, dest_ip = %u, src_port = %d, dest_port = %d", src_ip, dest_ip, src_port, dest_port);
     auto *full_conntable_entry = conntable.lookup_entry(entry);
 
     if ( !(src_ip && dest_ip && src_port && dest_port) )
@@ -250,6 +262,10 @@ MITM_conn_data *MITM::lookup_conn(be32_t src_ip, be32_t dest_ip,
             static_cast<conn_table_entry *>(full_conntable_entry->user_arg);
 
     if ( full_conntable_entry == nullptr ) {
+		return nullptr;
+    }
+
+    if ( full_conntable_entry->user_arg == nullptr ) {
         throw std::runtime_error("nullptr dereference");
     }
 
@@ -298,6 +314,12 @@ void MITM::tx_ip_datagram(char *datagram, size_t len) {
             throw std::runtime_error("unexpected tuple");
         }
     }
+
+	// before modifying IP header, make sure checksum is currently correct
+	if(calc_ipv4_checksum(pbuf_iphdr) != 0) {
+		LOG("%s: ipv4 checksum check failed", __func__);
+		return;
+	}
 
     // netif_ip should be in network byte order!
     pbuf_iphdr->dest.addr = netif_ip;

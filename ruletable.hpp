@@ -7,7 +7,6 @@
 #include <array>
 #include <shared_mutex>
 #include <stdatomic.h>
-#include <string>
 
 static constexpr auto RULE_NAME_MAXLEN = 20;
 

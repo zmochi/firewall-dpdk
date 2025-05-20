@@ -9,6 +9,7 @@
 #include <iostream>
 
 #include "MITM/setup.hpp"
+#include "macaddr.hpp"
 #include "utils.h"
 
 static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
@@ -49,7 +50,7 @@ volatile bool         force_quit = false;
 int                   count = 0;
 struct port_data {
   private:
-    /* inspired by example packet reassembly app
+    /* value choices inspired by example packet reassembly app
      * https://github.com/DPDK/dpdk/blob/main/examples/ip_reassembly/main.c
      * https://doc.dpdk.org/guides/sample_app_ug/ip_reassembly.html
      */
@@ -59,15 +60,20 @@ struct port_data {
     static constexpr uint64_t f_tbl_max_cycles = UINT64_MAX;
 
   public:
-    uint16_t                     port;
+    uint16_t port;
+    // port represents a network in the firewall, so this is the subnet of the
+    // network
+    be32_t                       netmask;
+    MAC_addr                     mac;
     struct rte_mempool          *mempool = nullptr;
     struct rte_ip_frag_tbl      *ip_frag_tbl = nullptr;
     struct rte_ip_frag_death_row dr;
 
     port_data() : port(-1), mempool(nullptr), ip_frag_tbl(nullptr) {}
 
-    port_data(uint16_t port, struct rte_mempool *mempool)
-        : port(port), mempool(mempool) {
+    port_data(uint16_t port, be32_t netmask, MAC_addr mac,
+              struct rte_mempool *mempool)
+        : port(port), netmask(netmask), mac(mac), mempool(mempool) {
         /* put this in init */
         ip_frag_tbl = rte_ip_frag_table_create(
             f_tbl_nb_buckets, f_tbl_associativity, f_tbl_max_entries,
@@ -369,26 +375,27 @@ MITM mitm;
 
 class MITM_client {
   public:
-    uint16_t                      port;
-    struct netconn               *listen_socket;
-    std::vector<struct netconn *> connections;
-    char                         *data_buf = nullptr;
-    size_t                        data_buf_len = 0;
-    MITM_client(uint16_t port)
-        : port(port), data_buf(new char[1 << 12]), data_buf_len(1 << 12) {
+    uint16_t          port;
+    int               listen_socket;
+    std::vector<int>  connections;
+    std::vector<char> data;
+    MITM_client(uint16_t port) : port(port) {
+        data.resize(1 << 12);
         listen_socket = mitm.socket();
-		if(listen_socket == nullptr) {
-			std::cout << "listen_socket is null" << std::endl;
-		}
+        if ( listen_socket < 0 ) {
+            std::cout << "mitm.socket() failed" << std::endl;
+        }
 
+        int err = 0;
         if ( mitm.bind(listen_socket, 80) != OK )
             throw std::runtime_error("Couldn't bind socket");
-        if ( mitm.listen(listen_socket, 20) != OK )
+        if ( (err = mitm.listen(listen_socket, 20)) != 0 ) {
             throw std::runtime_error("Couldn't listen on socket");
+        }
     }
 
     void recv_all_conns() {
-        for ( struct netconn *conn : connections ) {}
+        for ( int conn : connections ) {}
     }
 };
 
@@ -442,6 +449,33 @@ template <typename Deleter> void mitm_dpdk_free_cb(void *addr, void *arg) {
     deleter(addr);
 }
 
+#include <rte_ether.h>
+#include <rte_mbuf.h>
+
+int add_ethernet_header(rte_mbuf *mbuf, const MAC_addr &src_mac,
+                        const MAC_addr &dst_mac, const uint16_t ether_type) {
+
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)rte_pktmbuf_prepend(
+        mbuf, sizeof(struct rte_ether_hdr));
+
+    if ( eth_hdr == NULL ) {
+        return -1;
+    }
+
+    memcpy(&eth_hdr->src_addr, src_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
+    memcpy(&eth_hdr->dst_addr, dst_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
+	MAC_addr tmp_mac;
+	std::string tmp_mac_str = "42:dd:52:98:0f:4a";
+	parse_mac_addr(tmp_mac_str, tmp_mac);
+    memcpy(&eth_hdr->dst_addr, tmp_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
+
+    eth_hdr->ether_type = rte_cpu_to_be_16(ether_type);
+
+    mbuf->l2_len = sizeof(struct rte_ether_hdr);
+
+    return 0;
+}
+
 /* @brief main DPDK loop that extracts packets, calls query_decision_and_log()
  * on each packet, and transmits the packet if the decision is PKT_PASS.
 
@@ -474,6 +508,7 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
     uint16_t in_port = in_pdata.port, out_port = out_pdata.port;
     // rx - receive, tx - transmit
     port_data *rx_pdata = &in_pdata;
+    port_data *tx_pdata = &out_pdata;
     int        rx_port = in_port, tx_port = out_port;
     direction  direction = OUT;
 
@@ -481,6 +516,8 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
         /* switches between in_port and out_port, forwarding packets in both
          * directions in alternating order */
         rx_pdata = (port_data *)((uintptr_t)rx_pdata ^ ((uintptr_t)&in_pdata ^
+                                                        (uintptr_t)&out_pdata));
+        tx_pdata = (port_data *)((uintptr_t)tx_pdata ^ ((uintptr_t)&in_pdata ^
                                                         (uintptr_t)&out_pdata));
         rx_port ^= (in_port ^ out_port);
         tx_port ^= (in_port ^ out_port);
@@ -515,47 +552,76 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
             }
         }
 
-        MITM_client client(80);
+        static MITM_client client(80);
         mitm.make_socket_nonblocking(client.listen_socket);
-        struct netconn *conn = nullptr;
-        if ( mitm.accept(client.listen_socket, &conn) != OK )
-            ERROR("whoops on accept()");
-        if ( conn != nullptr ) {
+        struct sockaddr addr_new;
+        unsigned int    addrsize = 0;
+        int             conn = 0;
+        if ( (conn = mitm.accept(client.listen_socket, &addr_new, &addrsize)) <
+                 0 &&
+             errno != EWOULDBLOCK )
+            ERROR("whoops on accept(), conn=%d,errno=%d", conn, errno);
+        if ( conn > 0 ) {
+            LOG("accepted conn %d", conn);
             client.connections.push_back(conn);
-            conn = nullptr;
+            conn = 0;
         }
         for ( auto active_conn : client.connections ) {
-            ssize_t actual_len =
-                mitm.recv(active_conn, client.data_buf, client.data_buf_len);
+            ssize_t actual_len = mitm.recv(active_conn, client.data.data(),
+                                           client.data.capacity());
             if ( actual_len < 0 ) {
                 ERROR("whoops on recv");
                 continue;
             }
-            client.data_buf[actual_len] = '\0';
-            printf("received:\n%s", client.data_buf);
-            mitm.send(active_conn, client.data_buf, actual_len);
+            // TODO: fix this, only temporary for testing
+            client.data[actual_len] = '\0';
+            printf("received:\n%s", client.data.data());
+            mitm.send(active_conn, client.data.data(), actual_len);
         }
 
-        struct rte_mbuf *mitm_send_burst[RX_BURST_SIZE];
-        int              mitm_nb_pkts_tx_total = 0;
+        struct rte_mbuf *mitm_send_burst_in[RX_BURST_SIZE];
+        struct rte_mbuf *mitm_send_burst_out[RX_BURST_SIZE];
+        int              mitm_nb_pkts_in_total = 0;
+        int              mitm_nb_pkts_out_total = 0;
         size_t           mitm_buflen = 0;
         for ( int i = 0; i < RX_BURST_SIZE; i++ ) {
             auto buf_uptr = mitm.rx_ip_datagram(&mitm_buflen);
             if ( buf_uptr == nullptr ) break;
             struct rte_mbuf *mbuf = rte_pktmbuf_alloc(out_pdata.mempool);
             rte_pktmbuf_reset_headroom(mbuf);
-            if ( rte_pktmbuf_data_len(mbuf) < mitm_buflen ) {
-                ERROR("pktmbuf data_len smaller than MITM buffer len");
-                return -1;
+            auto *buf_iphdr = (struct rte_ipv4_hdr *)buf_uptr.get();
+            bool  datagram_dest_out = (buf_iphdr->dst_addr & out_pdata.netmask) != 0;
+            MAC_addr dest_mac = (datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
+            MAC_addr src_mac = (!datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
+            if ( add_ethernet_header(mbuf, src_mac, dest_mac, ETHTYPE_IPV4) !=
+                 0 ) {
+                ERROR("Couldn't add ethernet header");
+                continue;
             }
-            memcpy(rte_pktmbuf_mtod(mbuf, void *), buf_uptr.release(),
-                   mitm_buflen);
-            mitm_send_burst[mitm_nb_pkts_tx_total++] = mbuf;
+            char *data = rte_pktmbuf_append(mbuf, mitm_buflen);
+            if ( data == nullptr ) {
+                ERROR("Couldn't append mitm_buflen");
+                continue;
+            }
+            LOG("mbuf after rte_pktmbuf_alloc and rte_pktmbuf_append has "
+                "data_len = %u",
+                rte_pktmbuf_data_len(mbuf));
+            memcpy(data, buf_uptr.release(), rte_pktmbuf_data_len(mbuf));
+			if(datagram_dest_out)
+            mitm_send_burst_in[mitm_nb_pkts_in_total++] = mbuf;
+			else
+            mitm_send_burst_out[mitm_nb_pkts_out_total++] = mbuf;
+
         }
-        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst,
-                                      mitm_nb_pkts_tx_total);
-        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_tx_total; i++ ) {
-            rte_pktmbuf_free(mitm_send_burst[i]);
+        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst_in,
+                                      mitm_nb_pkts_in_total);
+        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_in_total; i++ ) {
+            rte_pktmbuf_free(mitm_send_burst_in[i]);
+        }
+        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst_out,
+                                      mitm_nb_pkts_out_total);
+        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_out_total; i++ ) {
+            rte_pktmbuf_free(mitm_send_burst_out[i]);
         }
 
         /* rte_eth_tx_burst() is responsible for freeing sent packets */
@@ -583,7 +649,8 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
  * @param logger log_list to record logs in
  */
 int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
-                   MAC_addr out_mac, log_list &logger) {
+                   uint32_t in_netmask, MAC_addr out_mac, uint32_t out_netmask,
+                   log_list &logger) {
     int ret;
     /* internal and external NIC identifiers, initialized with invalid values
      * (assigned real ones later) */
@@ -617,7 +684,7 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
         "packet_pool",
         (nb_tx_rings + nb_rx_rings) * MBUF_POOL_ELMS_PER_RING * 2,
         0 /* setting cache_size to 0 disables this feature */, 0,
-        MITM_MAX_EGRESS_DATAGRAM_SIZE, SOCKET_ID_ANY);
+        MITM_MAX_EGRESS_DATAGRAM_SIZE + RTE_PKTMBUF_HEADROOM, SOCKET_ID_ANY);
     if ( mbuf_pool == NULL ) {
         rte_exit(1, "Couldn't create pktmbuf_pool");
     }
@@ -632,8 +699,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     uint16_t   port;
     port_data *pdata = nullptr;
     /* -1 is sentinel value to indicate failure */
-    port_data int_port(-1, mbuf_pool);
-    port_data ext_port(-1, mbuf_pool);
+    port_data int_port(-1, rte_cpu_to_be_32(in_netmask), in_mac, mbuf_pool);
+    port_data ext_port(-1, rte_cpu_to_be_32(out_netmask), out_mac, mbuf_pool);
     RTE_ETH_FOREACH_DEV(port) {
         struct rte_ether_addr addr;
         if ( rte_eth_macaddr_get(port, &addr) < 0 ) {

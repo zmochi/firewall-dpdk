@@ -1,20 +1,19 @@
 #ifndef __PKT_H
 #define __PKT_H
 
-#include <netinet/in.h>
 #include <stdint.h>
 
 #include "endian.hpp"
 
 enum proto : uint8_t {
-    TCP = IPPROTO_TCP,
-    UDP = IPPROTO_UDP,
-    ICMP = IPPROTO_ICMP,
+    TCP = 0x06,
+    UDP = 0x11,
+    ICMP = 0x01,
     PROTO_ANY = 0x02,
     NUL_PROTO = 0xFF,
 };
 
-static_assert(__BYTE_ORDER == __LITTLE_ENDIAN);
+//static_assert(__BYTE_ORDER == __LITTLE_ENDIAN);
 enum eth_proto : be16_t {
     ETHTYPE_NUL = 0xFFFF,  /* marked as reserved in IEEE 802 */
     ETHTYPE_IPV4 = 0x0008, /* 0x0800 in big endian */

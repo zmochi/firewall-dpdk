@@ -55,17 +55,17 @@ class MITM : Singleton<MITM> {
     ~MITM();
     void                    tx_ip_datagram(char *frame, size_t len);
     std::unique_ptr<char[]> rx_ip_datagram(size_t *len);
-    struct netconn         *socket();
-	int make_socket_nonblocking(struct netconn* sock);
+    int socket();
+	int make_socket_nonblocking(int  sock);
     // all of the following function return -1 on error, or positive value
-    int bind(struct netconn *socket, uint16_t port);
-    int listen(struct netconn *socket, uint8_t backlog);
-    int accept(struct netconn *listen_socket, struct netconn **new_sock);
-    int close(struct netconn *socket);
-    int shutdown(struct netconn *socket, bool ingress, bool egress);
+    int bind(int socket, uint16_t port);
+    int listen(int socket, uint8_t backlog);
+    int accept(int listen_socket, struct sockaddr* addr, unsigned int *addrsize);
+    int close(int socket);
+    int shutdown(int socket, bool ingress, bool egress);
     // buffer points to where data should be copied, buf_cap holds buffer
     // capacity
-    ssize_t recv(struct netconn *, char *buffer, size_t buf_cap);
+    ssize_t recv(int socket, char *buffer, size_t buf_cap);
     // blocks until all data is sent
-    ssize_t send(struct netconn *, char *src, size_t len);
+    ssize_t send(int socket, char *src, size_t len);
 };

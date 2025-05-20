@@ -1,5 +1,6 @@
 #include <memory>
 
+#include <netinet/in.h>
 #include "../endian.hpp"
 #include "../packet.hpp"
 #include "../ruletable.hpp"
@@ -52,7 +53,7 @@ parse_line(const char *rule, char field_delim, char field_end_char) {
     return field_indices;
 }
 
-static int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
+int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
                         be32_t *ipaddr_dest_mask) {
     constexpr auto IP_NB_FIELDS = 4;
     be32_t         ipaddr_val = 0;

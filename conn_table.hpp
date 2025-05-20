@@ -25,6 +25,7 @@ enum state_t {
     FIN_ACKED,
 };
 
+#include <iostream>
 struct conn_table_entry {
     be32_t  client_addr = 0;
     be32_t  server_addr = 0;
@@ -47,6 +48,14 @@ struct conn_table_entry {
     /* empty constructor to be able to assign entries[conn_table_entry] =
      * entry_instance*/
     conn_table_entry() {}
+
+	~conn_table_entry() {
+		// dear god...
+		if(user_arg){
+			if(server_addr == 0 && server_port == 0) delete (conn_table_entry*)user_arg;
+			else std::cout << "suspicious user_arg in conn_table_entry" << std::endl;
+		}
+	}
 
     conn_table_entry(pkt_props pkt)
         : client_addr(pkt.saddr), server_addr(pkt.daddr),
