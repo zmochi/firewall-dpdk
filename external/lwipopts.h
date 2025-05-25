@@ -79,7 +79,8 @@
  * MEM_SIZE: the size of the heap memory. If the application will send
  * a lot of data that needs to be copied, this should be set high.
  */
-#define MEM_SIZE 1600
+
+#define MEM_SIZE ( 90 * (1 << 20) ) /* 90MB */
 
 /*
    ------------------------------------------------
@@ -91,7 +92,7 @@
  * PBUF_REF). If the application sends a lot of data out of ROM (or other static
  * memory), this should be set high.
  */
-#define MEMP_NUM_PBUF 16
+#define MEMP_NUM_PBUF 1600
 
 /**
  * MEMP_NUM_RAW_PCB: Number of raw connection PCBs
@@ -173,7 +174,7 @@
 /**
  * PBUF_POOL_SIZE: the number of buffers in the pbuf pool.
  */
-#define PBUF_POOL_SIZE 8
+#define PBUF_POOL_SIZE 128
 
 /*
    ---------------------------------
@@ -184,7 +185,7 @@
  * LWIP_ARP==1: Enable ARP functionality.
  */
 #define LWIP_ARP      1
-#define LWIP_ETHERNET 1
+/*#define LWIP_ETHERNET 1*/
 
 /*
    --------------------------------
@@ -342,10 +343,6 @@
 
 #define TCP_LISTEN_BACKLOG 1
 
-#define TCP_PCB_CUSTOM_FIELDS                                                  \
-    ip_addr_t orig_src;                                                        \
-    ip_addr_t orig_dest;
-
 /*
    ----------------------------------
    ---------- Pbuf options ----------
@@ -438,20 +435,29 @@ void sys_check_core_locking(void);
 
 /* Custom options */
 
-#include <stdint.h>
-struct ip4addr {
-    uint32_t addr;
-};
-
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 1
 
 #define LWIP_DEBUG 1
-/*#define SOCKETS_DEBUG (0x80U | 0x03)*/
-/*#define TCPIP_DEBUG (0x80U | 0x03)*/
+/*
+#define PBUF_DEBUG (0x80U | 0x03)
+#define MEMP_DEBUG (0x80U | 0x03)
+#define ETHARP_DEBUG (0x80U | 0x03)
+#define SOCKETS_DEBUG (0x80U | 0x03)
+#define IP_DEBUG (0x80U | 0x03)
+#define TCP_OUTPUT_DEBUG (0x80U | 0x03)
 #define TCPIP_DEBUG (0x80U | 0x03)
 #define TCP_INPUT_DEBUG (0x80U | 0x03)
-#define IP_DEBUG (0x80U | 0x03)
+*/
 
+/* so lwIP doesn't export POSIX functions bind(), listen(), accept() and so on
+ * instead they get lwip prefix: lwip_bind(), lwip_listen(), lwip_accept()
+ */
 #define LWIP_COMPAT_SOCKETS 0
+
+/* TODO: because I can't seem to get checksum calculation to work right when modifying IP and TCP packets */
+#define CHECKSUM_CHECK_TCP 0
+#define LWIP_SO_LINGER 1
+#define LWIP_SOCKET_POLL 1
+#define SO_REUSE 1
 
 #endif /* LWIP_LWIPOPTS_H */

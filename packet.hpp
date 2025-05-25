@@ -14,11 +14,12 @@ enum proto : uint8_t {
 };
 
 //static_assert(__BYTE_ORDER == __LITTLE_ENDIAN);
+// numbers in network order
 enum eth_proto : be16_t {
-    ETHTYPE_NUL = 0xFFFF,  /* marked as reserved in IEEE 802 */
-    ETHTYPE_IPV4 = 0x0008, /* 0x0800 in big endian */
-    ETHTYPE_IPV6 = 0x0608, /* 0x0806 in big endian */
-    ETHTYPE_ARP = 0xDD86,  /* 0x86DD in big endian */
+    FW_ETHTYPE_NUL = 0xFFFF,  /* marked as reserved in IEEE 802 */
+    FW_ETHTYPE_IPV4 = 0x0008, /* 0x0800 in host */
+    FW_ETHTYPE_ARP = 0x0608, /* 0x0806 in host */
+    FW_ETHTYPE_IPV6 = 0xDD86,  /* 0x86DD in host */
 };
 
 enum direction : uint8_t {
@@ -100,7 +101,7 @@ struct pkt_props {
 
     pkt_props()
         : tcp_flags(TCP_NUL_FLAG), direction(NUL_DIRECTION), proto(NUL_PROTO),
-          eth_proto(ETHTYPE_NUL) {}
+          eth_proto(FW_ETHTYPE_NUL) {}
 
     pkt_props(::proto proto, be32_t saddr, be32_t daddr, be16_t sport,
               be16_t dport, enum tcp_flags tcp_flags)

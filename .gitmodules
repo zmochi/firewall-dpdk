@@ -10,3 +10,6 @@
 [submodule "external/pcre2"]
 	path = external/pcre2
 	url = https://github.com/PCRE2Project/pcre2.git
+[submodule "external/lwip"]
+	path = external/lwip
+	url = git@github.com:lwip-tcpip/lwip.git

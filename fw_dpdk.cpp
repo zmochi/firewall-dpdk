@@ -1,4 +1,6 @@
 #include <cstring>
+#include <list>
+#include <poll.h>
 #include <rte_ethdev.h>
 #include <rte_ip_frag.h>
 #include <rte_mbuf.h>
@@ -11,6 +13,24 @@
 #include "MITM/setup.hpp"
 #include "macaddr.hpp"
 #include "utils.h"
+
+#ifndef DEBUG
+#undef LOG
+#define LOG(x, ...) (void)0
+#endif
+
+/* eth, ip, and tcp header structs: */
+#include <rte_ether.h>
+#include <rte_ip.h>
+#include <rte_tcp.h>
+
+#include "DLP/filter.hpp"
+#include "DLP/http_parser.hpp"
+#include "conn_table.hpp"
+#include "firewall.hpp"
+#include "logger.hpp"
+#include "packet.hpp"
+#include "ruletable.hpp"
 
 static constexpr size_t ethhdr_size = sizeof(struct rte_ether_hdr),
                         udphdr_size = sizeof(struct rte_udp_hdr),
@@ -47,7 +67,6 @@ char *get_tcphdr_data(struct rte_mbuf *pkt) {
 static const uint16_t nb_rx_rings = 1, nb_tx_rings = 1;
 const int             MBUF_POOL_ELMS_PER_RING = 1024;
 volatile bool         force_quit = false;
-int                   count = 0;
 struct port_data {
   private:
     /* value choices inspired by example packet reassembly app
@@ -64,6 +83,7 @@ struct port_data {
     // port represents a network in the firewall, so this is the subnet of the
     // network
     be32_t                       netmask;
+    be32_t                       routingprefix;
     MAC_addr                     mac;
     struct rte_mempool          *mempool = nullptr;
     struct rte_ip_frag_tbl      *ip_frag_tbl = nullptr;
@@ -71,17 +91,20 @@ struct port_data {
 
     port_data() : port(-1), mempool(nullptr), ip_frag_tbl(nullptr) {}
 
-    port_data(uint16_t port, be32_t netmask, MAC_addr mac,
+    port_data(uint16_t port, be32_t routingprefix, be32_t netmask, MAC_addr mac,
               struct rte_mempool *mempool)
-        : port(port), netmask(netmask), mac(mac), mempool(mempool) {
+        : port(port), routingprefix(routingprefix), netmask(netmask), mac(mac),
+          mempool(mempool) {
         /* put this in init */
-        ip_frag_tbl = rte_ip_frag_table_create(
-            f_tbl_nb_buckets, f_tbl_associativity, f_tbl_max_entries,
-            f_tbl_max_cycles, SOCKET_ID_ANY);
-        if ( ip_frag_tbl == nullptr ) {
-            throw std::runtime_error(
-                "Couldn't initialize ip fragmentation table");
-        }
+        /*
+ip_frag_tbl = rte_ip_frag_table_create(
+f_tbl_nb_buckets, f_tbl_associativity, f_tbl_max_entries,
+f_tbl_max_cycles, SOCKET_ID_ANY);
+if ( ip_frag_tbl == nullptr ) {
+throw std::runtime_error(
+"Couldn't initialize ip fragmentation table");
+}
+*/
     }
 
     void cleanup() {
@@ -245,18 +268,6 @@ int init_sigint_handler() {
     return 0;
 }
 
-/* eth, ip, and tcp header structs: */
-#include <rte_ether.h>
-#include <rte_ip.h>
-#include <rte_tcp.h>
-
-#include "DLP/filter.hpp"
-#include "conn_table.hpp"
-#include "firewall.hpp"
-#include "logger.hpp"
-#include "packet.hpp"
-#include "ruletable.hpp"
-
 /* @brief fills pkt_props struct with data from packet.
  * if packet is not long enough to contain all fields in the pkt_props struct,
  * the struct instance is returned partially filled (unfilled fields get their
@@ -283,7 +294,7 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
 
     if ( eff_pktlen < ethhdr_size ) {
         ERROR("Packet too small to contain ethernet header");
-        pkt_props.eth_proto = ETHTYPE_NUL;
+        pkt_props.eth_proto = FW_ETHTYPE_NUL;
         goto ret;
     }
     /*
@@ -295,10 +306,10 @@ pkt_props extract_pkt_props(struct rte_mbuf &pkt, direction pkt_direction) {
 
     eff_pktlen -= ethhdr_size;
 
-    if ( pkt_props.eth_proto == ETHTYPE_IPV4 ) {
+    if ( pkt_props.eth_proto == FW_ETHTYPE_IPV4 ) {
         ipv4hdr_size = get_ipv4hdr_data(&pkt) - get_ethhdr_data(&pkt);
         if ( eff_pktlen < ipv4hdr_size ) {
-            pkt_props.eth_proto = ETHTYPE_NUL;
+            pkt_props.eth_proto = FW_ETHTYPE_NUL;
             goto ret;
         }
         auto *ipv4_hdr = (struct rte_ipv4_hdr *)get_ethhdr_data(&pkt);
@@ -346,7 +357,7 @@ uint16_t pre_query_hook(port_data &pdata, struct rte_mbuf *pkt,
                         const uint16_t    outoging_pkts_cap,
                         const uint64_t    timestamp) {
     uint16_t pkt_cnt = 0;
-    if ( get_eth_hdr(pkt)->ether_type == ETHTYPE_IPV4 &&
+    if ( get_eth_hdr(pkt)->ether_type == FW_ETHTYPE_IPV4 &&
          rte_ipv4_frag_pkt_is_fragmented(
              (struct rte_ipv4_hdr *)get_ethhdr_data(pkt)) ) {
         printf("got fragmented packet\n");
@@ -371,31 +382,410 @@ constexpr be32_t http_port_be = 0x5000;
 // SMTP port 25 in big endian
 constexpr be32_t smtp_port_be = 0x1900;
 
+// having this in global variable is very bad design :D
 MITM mitm;
 
+// this should be in MITM files
+struct MITM_conn {
+    MITM_conn &peer;
+    int        socket;
+    // socket field in adjacent element from MITM_conn_pair
+    bool finished_receiving = false;
+    bool finished_sending = false;
+    // to parse HTTP requests, need to know which side is sending requests
+    // (client) and which is responding (server)
+    bool is_http_client = false;
+    // finished both sending and receiving
+    std::vector<char>     data;
+    size_t                http_content_start = 0;
+    size_t                http_content_len = 0;
+    size_t                http_data_parsed = 0;
+    size_t                data_recvd = 0;
+    size_t                data_sent = 0;
+    constexpr static auto data_init_size = 1 << 11;
+
+    MITM_conn(int socket, MITM_conn &peer) : socket(socket), peer(peer) {
+        data.resize(data_init_size);
+    }
+
+    ~MITM_conn() { mark_done(); }
+
+    /*
+     * copy another MITM_conn and set a new peer, to make copy constructor in
+     * MITM_conn_pair easier
+     */
+    MITM_conn(MITM_conn &other, MITM_conn &peer) noexcept : peer(peer) {
+        socket = other.socket;
+        finished_receiving = other.finished_receiving;
+        finished_sending = other.finished_sending;
+        done = other.done;
+        data_sent = other.data_sent;
+        data = std::move(other.data);
+    }
+
+    /* closes this connection. may be called multiple times */
+    void mark_done() noexcept {
+        if ( done ) return;
+        int err = mitm.close(socket);
+        data_recvd = data_sent = 0;
+        finished_receiving = finished_sending = done = true;
+        if ( err < 0 ) {
+            ERROR("mitm.close() error");
+        }
+    }
+
+    bool is_done() noexcept { return done; }
+
+  private:
+    bool done = false;
+};
+
+/* client and server connection pair */
+struct MITM_conn_pair {
+    std::array<struct MITM_conn, 2> peers;
+    MITM_conn_pair(int conn, int peer)
+        : peers{MITM_conn(conn, peers.at(1)), MITM_conn(peer, peers.at(0))} {
+        peers.at(0).is_http_client = true;
+    }
+
+    MITM_conn_pair(MITM_conn_pair &&other) noexcept
+        : peers{MITM_conn(other.peers.at(0), peers.at(1)),
+                MITM_conn(other.peers.at(1), peers.at(0))} {}
+};
+
+#include <fstream>
 class MITM_client {
   public:
-    uint16_t          port;
-    int               listen_socket;
-    std::vector<int>  connections;
-    std::vector<char> data;
-    MITM_client(uint16_t port) : port(port) {
-        data.resize(1 << 12);
+    uint16_t  port;
+    int       listen_socket;
+    filter_fn filter_cb;
+
+    std::list<MITM_conn_pair> connections;
+
+    MITM_client(uint16_t port, filter_fn fn) : port(port), filter_cb(fn) {
         listen_socket = mitm.socket();
         if ( listen_socket < 0 ) {
             std::cout << "mitm.socket() failed" << std::endl;
         }
 
         int err = 0;
-        if ( mitm.bind(listen_socket, 80) != OK )
+        if ( mitm.bind(listen_socket, port) < 0 )
             throw std::runtime_error("Couldn't bind socket");
         if ( (err = mitm.listen(listen_socket, 20)) != 0 ) {
             throw std::runtime_error("Couldn't listen on socket");
         }
+        if ( mitm.make_socket_nonblocking(listen_socket) < 0 ) {
+            throw std::runtime_error("make_socket_nonblocking() error");
+        }
     }
 
-    void recv_all_conns() {
-        for ( int conn : connections ) {}
+    /* ^ Linux sockaddr definition has unsigned short sa_family.
+     * MITM (lwIP actually) has char sa_len, char sa_family on the
+     * same memory. shift left to erase sa_len.
+     */
+    static uint8_t read_mitm_sa_family(uint16_t sa_family) {
+#ifndef __linux__
+#error Linux-only code exists, read_mitm_sa_family()
+#endif /* __linux__ */
+        return sa_family >> sizeof(uint8_t) * CHAR_BIT;
+    }
+
+    void process() {
+        struct sockaddr addr_new = {};
+        unsigned int    addrsize = sizeof(addr_new);
+        int             conn = 0;
+        int             peer = 0;
+        int             err;
+        if ( (conn = mitm.accept(listen_socket, &addr_new, &addrsize)) < 0 &&
+             errno != EWOULDBLOCK )
+            ERROR("whoops on accept(), conn=%d,errno=%d", conn, errno);
+
+        if ( conn > 0 ) {
+            if ( read_mitm_sa_family(addr_new.sa_family) != AF_INET ) {
+                throw std::runtime_error("Got non-IPv4 connection");
+            }
+
+            // connect to server:
+            auto *info = reinterpret_cast<struct sockaddr_in *>(&addr_new);
+            auto *conn_entry =
+                mitm.lookup_conn(info->sin_addr.s_addr, 0, info->sin_port, 0);
+            info->sin_addr.s_addr = conn_entry->dest_ip;
+            info->sin_port = conn_entry->dest_port;
+
+            if ( (peer = mitm.socket()) < 0 ) {
+                ERROR("errno = %d", errno);
+                throw std::runtime_error("mitm.socket() failed");
+            }
+
+            if ( mitm.make_socket_nonblocking(conn) < 0 ||
+                 mitm.make_socket_nonblocking(peer) < 0 )
+                throw std::runtime_error(
+                    "mitm.make_socket_nonblocking() failed");
+
+            if ( (err = mitm.connect(peer, &addr_new, addrsize)) < 0 &&
+                 errno != EINPROGRESS ) {
+                switch ( errno ) {
+                    case ECONNREFUSED:
+                        LOG("ECONNREFUSED on connect() after accept()");
+                        if ( mitm.close(conn) < 0 || mitm.close(peer) < 0 ) {
+                            throw std::runtime_error("mitm.close() error");
+                        };
+                        break;
+                    default:
+                        throw std::runtime_error("mitm.connect() failed");
+                }
+            } else {
+                if ( (err = mitm.getsockname(peer, &addr_new, &addrsize)) < 0 ||
+                     read_mitm_sa_family(addr_new.sa_family) != AF_INET ) {
+                    throw std::runtime_error("mitm.getsockname() failed");
+                }
+
+                assert(info == (void *)&addr_new);
+                conn_entry->MITM_ext_port = info->sin_port;
+                connections.emplace_back(conn, peer);
+            }
+            conn = -1;
+            peer = -1;
+        }
+
+        for ( auto item = connections.begin(); item != connections.end(); ) {
+            if ( item->peers.at(0).is_done() && item->peers.at(1).is_done() ) {
+                item = connections.erase(item);
+                continue;
+            }
+
+            // run twice - transfer data from and to both sides
+            for ( auto &active_conn : item->peers ) {
+                int    &conn_socket = active_conn.socket;
+                int    &peer_socket = active_conn.peer.socket;
+                auto   &data = active_conn.data;
+                bool   &finished_receiving = active_conn.finished_receiving;
+                bool   &finished_sending = active_conn.finished_sending;
+                size_t &data_recvd = active_conn.data_recvd;
+                size_t &data_sent = active_conn.data_sent;
+
+                struct linger ling = {.l_onoff = 1, .l_linger = 0};
+
+                if ( active_conn.is_done() ) {
+                    continue;
+                }
+
+                if ( data_recvd >= data.size() ) data.resize(data.size() * 2);
+
+                pollfd pfd{.fd = conn_socket,
+                           .events = MITM_POLLIN | MITM_POLLOUT | MITM_POLLERR,
+                           .revents = 0};
+                if ( mitm.poll(&pfd, 1, 0) < 0 ) {
+                    throw std::runtime_error("poll failed");
+                };
+
+                if ( pfd.revents & MITM_POLLERR ) {
+                    int          errno_val = 0;
+                    unsigned int val_len = sizeof(errno_val);
+                    if ( mitm.getsockopt_SOLSOCKET_SOERROR(
+                             conn_socket, SOL_SOCKET, SO_ERROR, &errno_val,
+                             &val_len) < 0 ) {
+                        throw std::runtime_error("mitm.getsockopt() failed");
+                    };
+                    LOG("POLLERR: errno_val = %d. %s", errno_val,
+                        strerror(errno_val));
+
+                    switch ( errno_val ) {
+                            // not sure about this case..
+                        case 0:
+                            break;
+                            /* connect() on socket, connect
+                             * refused/reset/aborted.. */
+                        case ECONNABORTED:
+                            LOG("-------ECONNABORTED");
+                        case ECONNREFUSED:
+                        case ECONNRESET:
+                            // trigger RST for peer too
+                            if ( mitm.setsockopt_SOLSOCKET_SOLINGER(
+                                     active_conn.peer.socket, SOL_SOCKET,
+                                     SO_LINGER, &ling, sizeof(ling)) < 0 ) {
+                                ERROR("setsockopt: errno=%d, %s", errno,
+                                      strerror(errno));
+                                throw std::runtime_error("setsockopt() failed");
+                            };
+                        /* connect() on socket, timed out */
+                        case ETIMEDOUT:
+                            active_conn.mark_done();
+                            active_conn.peer.mark_done();
+                        /* connect() still in progress */
+                        case EINPROGRESS:
+                            continue;
+                        default:
+                            ERROR("errno = %d", errno_val);
+                            ERROR("err: %s, socket = %d", strerror(errno_val),
+                                  conn_socket);
+                            throw std::runtime_error("Unhandled errno_val");
+                    }
+                } else if ( !((pfd.revents & MITM_POLLOUT) ||
+                              (pfd.revents & MITM_POLLIN)) ) {
+                    // socket not connected yet
+                    continue;
+                }
+
+                if ( !finished_receiving ) {
+                    ssize_t actual_len =
+                        mitm.recv(conn_socket, data.data() + data_recvd,
+                                  data.size() - data_recvd);
+                    if ( actual_len < 0 ) {
+                        switch ( errno ) {
+                                /* connect() still in progress */
+                            case EINPROGRESS:
+                                continue;
+#if EAGAIN != EWOULDBLOCK
+                            case EAGAIN:
+#endif
+                            case EWOULDBLOCK:
+                                continue;
+                            case ETIMEDOUT:
+                            case ECONNRESET:
+                                // trigger RST for peer too
+                                if ( mitm.setsockopt_SOLSOCKET_SOLINGER(
+                                         active_conn.peer.socket, SOL_SOCKET,
+                                         SO_LINGER, &ling, sizeof(ling)) < 0 ) {
+                                    ERROR("setsockopt: errno=%d, %s", errno,
+                                          strerror(errno));
+                                    throw std::runtime_error(
+                                        "setsockopt() failed");
+                                };
+                            default:
+                                active_conn.mark_done();
+                                active_conn.peer.mark_done();
+                                ERROR("whoops on recv, actual_len "
+                                      "= %zd, errno = %d",
+                                      actual_len, errno);
+                                break;
+                        }
+                        continue;
+                    } else if ( actual_len == 0 ) {
+                        LOG("finished receiving on socket %d. filtering..",
+                            conn_socket);
+                        finished_receiving = true;
+                        std::ofstream    file("filter_input.txt",
+                                              std::ios::binary);
+                        std::string_view str(data.data(), data_recvd);
+                        file << str;
+                        if ( filter_cb(data.data(), data_recvd) ==
+                             FILTER_DROP ) {
+                            LOG("filter dropped");
+                            data.clear();
+                            data_recvd = 0;
+                        }
+                    } else { /* actual_len > 0 */
+                        LOG("actual_len = %zd, data_recvd = %zd, data.size() = "
+                            "%zu",
+                            actual_len, data_recvd, data.size());
+
+                        data_recvd += actual_len;
+
+                        if ( port == 80 && active_conn.is_http_client ) {
+                            LOG("parsing http request");
+                            auto parsed =
+                                http_parse_request(data.data(), data_recvd);
+                            if ( parsed.metadata_len < 0 ) {
+                                if ( parsed.metadata_len == -1 ) {
+                                    LOG("Rejecting malformed HTTP request");
+                                    data.clear();
+                                    continue;
+                                } else if ( parsed.metadata_len == -2 ) {
+                                    LOG("HTTP request incomplete");
+                                    continue;
+                                } else {
+                                    throw std::runtime_error(
+                                        "Unrecognized return value");
+                                }
+                            }
+                            // check if content exists:
+                            if ( data_recvd - parsed.metadata_len > 0 ) {
+                                for ( int i = 0; i < parsed.num_headers; i++ ) {
+                                    if ( parsed.headers.at(i).name ==
+                                         "Content-Length" ) {
+                                        LOG("found content-length header");
+                                        active_conn.http_content_len = atoi(
+                                            parsed.headers.at(i).value.data());
+                                        active_conn.http_content_start =
+                                            parsed.metadata_len;
+                                    }
+                                }
+                            }
+                            if ( filter_cb(data.data(), parsed.metadata_len) ==
+                                     FILTER_DROP ||
+                                 filter_cb(data.data() +
+                                               active_conn.http_content_start,
+                                           active_conn.http_content_len) ==
+                                     FILTER_DROP ) {
+                                LOG("filter dropped, http");
+                                data.clear();
+                                data_recvd = 0;
+                            }
+                            if ( (actual_len =
+                                      mitm.send(peer_socket, data.data(),
+                                                data_recvd)) < 0 ) {
+                                LOG("http send: errno = %d, %s", errno,
+                                    strerror(errno));
+                                switch ( errno ) {
+                                    case EWOULDBLOCK:
+                                    case EINPROGRESS:
+                                        continue;
+                                    case ECONNRESET:
+                                        active_conn.mark_done();
+                                        active_conn.peer.mark_done();
+                                        continue;
+                                    default:
+                                        ERROR("whoops on send, errno=%d, %s",
+                                              errno, strerror(errno));
+                                        break;
+                                }
+                            } else {
+                                data_sent += actual_len;
+                            }
+                        }
+                    }
+                } else if ( !finished_sending ) {
+                    LOG("sending on socket %d, data_sent=%zu", conn_socket,
+                        data_sent);
+                    ssize_t actual_len =
+                        mitm.send(peer_socket, data.data() + data_sent,
+                                  data_recvd - data_sent);
+                    if ( actual_len < 0 ) {
+                        LOG("send: errno = %d", errno);
+                        switch ( errno ) {
+#if EAGAIN != EWOULDBLOCK
+                            case EAGAIN:
+#endif
+                            case EWOULDBLOCK:
+                            case EINPROGRESS:
+                                continue;
+                            case EPIPE:
+                                // below mitm.close() was already called
+                                continue;
+                            case ECONNRESET:
+                                active_conn.mark_done();
+                                active_conn.peer.mark_done();
+                                continue;
+                            default:
+                                ERROR("whoops on send, errno=%d, %s", errno,
+                                      strerror(errno));
+                                break;
+                        }
+                    } else if ( actual_len == 0 ) {
+                        assert(data_sent == data_recvd);
+                        finished_sending = true;
+                    } else { /* actual_len > 0 */
+                        data_sent += actual_len;
+                    }
+                } else {
+                    active_conn.mark_done();
+                    // now peer can't send() to active_conn socket anymore, so:
+                    active_conn.peer.mark_done();
+                }
+            }
+            item++;
+        }
     }
 };
 
@@ -410,17 +800,52 @@ class MITM_client {
 pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
                               struct ruletable &ruletable, log_list &logger,
                               conn_table &conn_table, filter_fn filter_cb) {
-    bool is_ipv4 = pkt_props.eth_proto == ETHTYPE_IPV4;
+    bool is_arp = pkt_props.eth_proto == FW_ETHTYPE_ARP;
+    bool is_ipv4 = pkt_props.eth_proto == FW_ETHTYPE_IPV4;
     bool is_tcp = pkt_props.proto == IPPROTO_TCP;
     bool has_ack = is_tcp && pkt_props.tcp_flags & TCP_ACK_FLAG;
     bool do_filter =
         is_ipv4 && is_tcp &&
-        (pkt_props.dport == http_port_be || pkt_props.dport == smtp_port_be);
+        (pkt_props.dport == http_port_be || pkt_props.dport == smtp_port_be ||
+         pkt_props.sport == http_port_be || pkt_props.sport == smtp_port_be);
     decision_info dc;
     decision_info ruletable_dc = ruletable.query(&pkt_props, PKT_DROP);
 
+    if ( ruletable_dc.decision == PKT_PASS && do_filter ) {
+        /*
+LOG("transmitting to MITM, TCP flags: R=%d, F=%d",
+    (pkt_props.tcp_flags & TCP_RST_FLAG) != 0,
+    (pkt_props.tcp_flags & TCP_FIN_FLAG) != 0);
+LOG("src ip = %d", pkt_props.saddr);
+        */
+        rte_mbuf *mbuf = &pkt;
+        // assuming that all headers fit in the first packet, so we got all the
+        // info we needed in pkt_props - simply transmit rest of the packets
+        pbuf *head = mitm.buf_alloc_copy((char *)get_eth_hdr(mbuf),
+                                         rte_pktmbuf_data_len(mbuf));
+        if ( head == nullptr ) {
+            ERROR("mitm.buf_alloc_copy: failed allocating");
+        }
+        while ( (mbuf = mbuf->next) != nullptr ) {
+            pbuf *chained_buf = nullptr;
+            chained_buf = mitm.buf_alloc_copy((char *)get_eth_hdr(mbuf),
+                                              rte_pktmbuf_data_len(mbuf));
+            if ( chained_buf == nullptr ) {
+                ERROR("mitm.buf_alloc_copy: failed allocating");
+                break;
+            }
+
+            mitm.buf_chain(head, chained_buf);
+        }
+        if ( head != nullptr ) mitm.tx_eth_frame(head);
+        return PKT_DROP;
+    }
+
     if ( is_tcp && has_ack ) {
         dc = conn_table.tcp_existing_conn(pkt_props);
+        if ( dc.decision == PKT_PASS && (pkt_props.sport == http_port_be ||
+                                         pkt_props.sport == smtp_port_be) )
+            do_filter = true;
     } else {
         dc = ruletable.query(&pkt_props, PKT_DROP);
 
@@ -429,10 +854,18 @@ pkt_dc query_decision_and_log(rte_mbuf &pkt, const pkt_props pkt_props,
         }
     }
 
-    if ( do_filter && dc.decision == PKT_PASS ) {
-        mitm.tx_ip_datagram(get_ethhdr_data(&pkt),
-                            rte_pktmbuf_pkt_len(&pkt) - ethhdr_size);
-        return PKT_DROP;
+    if ( is_arp ) {
+        auto *pbuf = mitm.buf_alloc_copy(rte_pktmbuf_mtod(&pkt, char *),
+                                         rte_pktmbuf_pkt_len(&pkt));
+        if ( pbuf == nullptr )
+            ERROR("out of mem");
+        else
+            mitm.tx_eth_frame(pbuf);
+    }
+
+    if ( (pkt_props.tcp_flags & TCP_FIN_FLAG) != 0 ) {
+        LOG("got FIN packet, do_filter = %s, dc.decision = %d, dc.reason = %d",
+            do_filter ? "true" : "false", dc.decision, dc.reason);
     }
 
 log:
@@ -441,12 +874,6 @@ log:
         logger.store_log(log_row_t(pkt_props, dc));
 
     return dc.decision;
-}
-
-void                             tmp_cb(void *a, void *b) {}
-template <typename Deleter> void mitm_dpdk_free_cb(void *addr, void *arg) {
-    auto &deleter = *static_cast<Deleter *>(arg);
-    deleter(addr);
 }
 
 #include <rte_ether.h>
@@ -464,10 +891,12 @@ int add_ethernet_header(rte_mbuf *mbuf, const MAC_addr &src_mac,
 
     memcpy(&eth_hdr->src_addr, src_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
     memcpy(&eth_hdr->dst_addr, dst_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
-	MAC_addr tmp_mac;
-	std::string tmp_mac_str = "42:dd:52:98:0f:4a";
-	parse_mac_addr(tmp_mac_str, tmp_mac);
-    memcpy(&eth_hdr->dst_addr, tmp_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
+    /*
+    MAC_addr tmp_mac;
+    std::string tmp_mac_str = "42:dd:52:98:0f:4a";
+    parse_mac_addr(tmp_mac_str, tmp_mac);
+memcpy(&eth_hdr->dst_addr, tmp_mac.addr_bytes.data(), RTE_ETHER_ADDR_LEN);
+    */
 
     eth_hdr->ether_type = rte_cpu_to_be_16(ether_type);
 
@@ -515,12 +944,8 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
     while ( !force_quit ) {
         /* switches between in_port and out_port, forwarding packets in both
          * directions in alternating order */
-        rx_pdata = (port_data *)((uintptr_t)rx_pdata ^ ((uintptr_t)&in_pdata ^
-                                                        (uintptr_t)&out_pdata));
-        tx_pdata = (port_data *)((uintptr_t)tx_pdata ^ ((uintptr_t)&in_pdata ^
-                                                        (uintptr_t)&out_pdata));
-        rx_port ^= (in_port ^ out_port);
-        tx_port ^= (in_port ^ out_port);
+        std::swap(tx_pdata, rx_pdata);
+        std::swap(tx_port, rx_port);
         direction = static_cast<enum direction>(direction ^ (OUT ^ IN));
 
         struct rte_mbuf *pkt;
@@ -544,7 +969,7 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
                 pkt_props props = extract_pkt_props(*pkt, direction);
                 if ( query_decision_and_log(*pkt, props, ruletable, logger,
                                             conn_table,
-                                            filter_c_code) == PKT_PASS ) {
+                                            filter_entry) == PKT_PASS ) {
                     send_burst[nb_pkts_tx_total++] = pkt;
                 } else {
                     rte_pktmbuf_free(pkt);
@@ -552,87 +977,96 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
             }
         }
 
-        static MITM_client client(80);
-        mitm.make_socket_nonblocking(client.listen_socket);
-        struct sockaddr addr_new;
-        unsigned int    addrsize = 0;
-        int             conn = 0;
-        if ( (conn = mitm.accept(client.listen_socket, &addr_new, &addrsize)) <
-                 0 &&
-             errno != EWOULDBLOCK )
-            ERROR("whoops on accept(), conn=%d,errno=%d", conn, errno);
-        if ( conn > 0 ) {
-            LOG("accepted conn %d", conn);
-            client.connections.push_back(conn);
-            conn = 0;
-        }
-        for ( auto active_conn : client.connections ) {
-            ssize_t actual_len = mitm.recv(active_conn, client.data.data(),
-                                           client.data.capacity());
-            if ( actual_len < 0 ) {
-                ERROR("whoops on recv");
-                continue;
-            }
-            // TODO: fix this, only temporary for testing
-            client.data[actual_len] = '\0';
-            printf("received:\n%s", client.data.data());
-            mitm.send(active_conn, client.data.data(), actual_len);
-        }
+        static MITM_client client(80, filter_entry);
+        client.process();
 
         struct rte_mbuf *mitm_send_burst_in[RX_BURST_SIZE];
         struct rte_mbuf *mitm_send_burst_out[RX_BURST_SIZE];
         int              mitm_nb_pkts_in_total = 0;
         int              mitm_nb_pkts_out_total = 0;
         size_t           mitm_buflen = 0;
+        bool             datagram_dest_out;
         for ( int i = 0; i < RX_BURST_SIZE; i++ ) {
-            auto buf_uptr = mitm.rx_ip_datagram(&mitm_buflen);
+            auto buf_uptr = mitm.rx_eth_frame(&mitm_buflen);
             if ( buf_uptr == nullptr ) break;
+            auto eth_type =
+                ((struct rte_ether_hdr *)buf_uptr.get())->ether_type;
             struct rte_mbuf *mbuf = rte_pktmbuf_alloc(out_pdata.mempool);
             rte_pktmbuf_reset_headroom(mbuf);
-            auto *buf_iphdr = (struct rte_ipv4_hdr *)buf_uptr.get();
-            bool  datagram_dest_out = (buf_iphdr->dst_addr & out_pdata.netmask) != 0;
-            MAC_addr dest_mac = (datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
-            MAC_addr src_mac = (!datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
-            if ( add_ethernet_header(mbuf, src_mac, dest_mac, ETHTYPE_IPV4) !=
-                 0 ) {
-                ERROR("Couldn't add ethernet header");
-                continue;
+            // check IP destination and send to correct network
+            // (internal/external)
+            if ( eth_type == FW_ETHTYPE_ARP ) {
+                auto *arp_hdr = (struct rte_arp_hdr *)((char *)buf_uptr.get() +
+                                                       ethhdr_size);
+                // issue: if broadcast then should be sent on both ports,
+                // technically...
+                datagram_dest_out =
+                    ((arp_hdr->arp_data.arp_tip & out_pdata.netmask) ==
+                     out_pdata.routingprefix);
+            } else if ( eth_type == FW_ETHTYPE_IPV4 ) {
+                auto *buf_iphdr =
+                    (struct rte_ipv4_hdr *)((char *)buf_uptr.get() +
+                                            ethhdr_size);
+                datagram_dest_out = (buf_iphdr->dst_addr & out_pdata.netmask) ==
+                                    out_pdata.routingprefix;
+                /*
+                MAC_addr dest_mac =
+                    (datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
+                MAC_addr src_mac =
+                    (!datagram_dest_out) ? out_pdata.mac : in_pdata.mac;
+                            if ( add_ethernet_header(mbuf, src_mac, dest_mac,
+                FW_ETHTYPE_IPV4) != 0 ) { ERROR("Couldn't add ethernet header");
+                    continue;
+                }
+                            */
+            } else {
+                throw std::runtime_error("Unknown ethernet protocol");
             }
             char *data = rte_pktmbuf_append(mbuf, mitm_buflen);
             if ( data == nullptr ) {
                 ERROR("Couldn't append mitm_buflen");
                 continue;
             }
-            LOG("mbuf after rte_pktmbuf_alloc and rte_pktmbuf_append has "
-                "data_len = %u",
-                rte_pktmbuf_data_len(mbuf));
-            memcpy(data, buf_uptr.release(), rte_pktmbuf_data_len(mbuf));
-			if(datagram_dest_out)
-            mitm_send_burst_in[mitm_nb_pkts_in_total++] = mbuf;
-			else
-            mitm_send_burst_out[mitm_nb_pkts_out_total++] = mbuf;
+            memcpy(data, buf_uptr.get(), rte_pktmbuf_data_len(mbuf));
+            auto props = extract_pkt_props(*mbuf, datagram_dest_out ? OUT : IN);
+            /*
+if ( props.tcp_flags & TCP_ACK_FLAG ) {
+    conn_table.tcp_existing_conn(props);
+} else {
+    decision_info dummy;
+    dummy.decision = PKT_PASS;
+    dummy.reason = REASON_RULE;
+    dummy.rule_idx = -1;
+    conn_table.tcp_new_conn(props, dummy);
+}
+            */
+            if ( !datagram_dest_out )
+                mitm_send_burst_in[mitm_nb_pkts_in_total++] = mbuf;
+            else
+                mitm_send_burst_out[mitm_nb_pkts_out_total++] = mbuf;
+        }
+        auto tx_frames = [](uint16_t port, struct rte_mbuf **pkts,
+                            uint16_t nb_pkts_total) {
+            /* rte_eth_tx_burst() is responsible for freeing sent packets */
+            auto nb_pkts_tx = rte_eth_tx_burst(port, 0, pkts, nb_pkts_total);
+            /* free unsent packets. if rte_eth_tx_burst() was unable to transmit
+             * all packets, the tx queue is full. drop remaining packets to not
+             * hold up the execution (instead of sending again) */
+            for ( int i = nb_pkts_tx; i < nb_pkts_total; i++ ) {
+                rte_pktmbuf_free(pkts[i]);
+            }
+        };
+        if ( mitm_nb_pkts_in_total > 0 )
+            LOG("sending %d packets in..", mitm_nb_pkts_in_total);
+        tx_frames(in_port, mitm_send_burst_in, mitm_nb_pkts_in_total);
 
-        }
-        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst_in,
-                                      mitm_nb_pkts_in_total);
-        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_in_total; i++ ) {
-            rte_pktmbuf_free(mitm_send_burst_in[i]);
-        }
-        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, mitm_send_burst_out,
-                                      mitm_nb_pkts_out_total);
-        for ( int i = nb_pkts_tx; i < mitm_nb_pkts_out_total; i++ ) {
-            rte_pktmbuf_free(mitm_send_burst_out[i]);
-        }
+        if ( mitm_nb_pkts_out_total > 0 )
+            LOG("sending %d packets out..", mitm_nb_pkts_out_total);
+        tx_frames(out_port, mitm_send_burst_out, mitm_nb_pkts_out_total);
 
-        /* rte_eth_tx_burst() is responsible for freeing sent packets */
-        nb_pkts_tx = rte_eth_tx_burst(tx_port, 0, send_burst, nb_pkts_tx_total);
+        tx_frames(tx_port, send_burst, nb_pkts_tx_total);
 
-        /* free unsent packets. if rte_eth_tx_burst() was unable to transmit all
-         * packets, the tx queue is full. drop remaining packets to not hold up
-         * the execution (instead of sending again) */
-        for ( int i = nb_pkts_tx; i < nb_pkts_tx_total; i++ ) {
-            rte_pktmbuf_free(send_burst[i]);
-        }
+        // std::this_thread::sleep_for(std::chrono::milliseconds(70));
     }
 
     return 0;
@@ -649,11 +1083,12 @@ int firewall_loop(ruletable &ruletable, log_list &logger,
  * @param logger log_list to record logs in
  */
 int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
-                   uint32_t in_netmask, MAC_addr out_mac, uint32_t out_netmask,
+                   be32_t in_routingprefix, be32_t in_netmask, MAC_addr out_mac,
+                   be32_t out_routingprefix, be32_t out_netmask,
                    log_list &logger) {
     int ret;
-    /* internal and external NIC identifiers, initialized with invalid values
-     * (assigned real ones later) */
+    /* internal and external NIC identifiers, initialized with invalid
+     * values (assigned real ones later) */
     struct rte_mempool *mbuf_pool;
 
     if ( init_sigint_handler() != 0 ) return EXIT_FAILURE;
@@ -661,8 +1096,8 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     /* read about rte_eal_init() at
      * https://doc.dpdk.org/guides/prog_guide/env_abstraction_layer.html
      *
-     * passing {argc, argv} allows passing special DPDK commandline options and
-     * settings at execution. read more at
+     * passing {argc, argv} allows passing special DPDK commandline options
+     * and settings at execution. read more at
      * https://doc.dpdk.org/guides/linux_gsg/linux_eal_parameters.html
      *
      * documentation for error return values of rte_eal_init() are at
@@ -670,12 +1105,11 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
      * there should be a switch() on rte_errno if error occurs
      */
     if ( (ret = rte_eal_init(argc, argv)) < 0 )
-        rte_exit(
-            EXIT_FAILURE,
-            "error on initializing EAL. have you run `sudo ./configure.sh`?\n");
+        rte_exit(EXIT_FAILURE, "error on initializing EAL. have you run "
+                               "`sudo ./configure.sh`?\n");
 
-    /* rte_eal_init may modify `ret` elements of argv, modify argc and argv to
-     * match valid array elements */
+    /* rte_eal_init may modify `ret` elements of argv, modify argc and argv
+     * to match valid array elements */
     argc -= ret;
     argv += ret;
 
@@ -690,17 +1124,17 @@ int start_firewall(int argc, char **argv, ruletable &rt, MAC_addr in_mac,
     }
 
     /**************************
-     * iterates over all available ports, checking each port's MAC. if the MAC
-     * matches internal/external port MACs given in function parameters, set
-     * int_port/ext_port to its matching DPDK port number.
+     * iterates over all available ports, checking each port's MAC. if the
+     * MAC matches internal/external port MACs given in function parameters,
+     * set int_port/ext_port to its matching DPDK port number.
      */
 
     /* NIC to initialize */
     uint16_t   port;
     port_data *pdata = nullptr;
     /* -1 is sentinel value to indicate failure */
-    port_data int_port(-1, rte_cpu_to_be_32(in_netmask), in_mac, mbuf_pool);
-    port_data ext_port(-1, rte_cpu_to_be_32(out_netmask), out_mac, mbuf_pool);
+    port_data int_port(-1, in_routingprefix, in_netmask, in_mac, mbuf_pool);
+    port_data ext_port(-1, out_routingprefix, out_netmask, out_mac, mbuf_pool);
     RTE_ETH_FOREACH_DEV(port) {
         struct rte_ether_addr addr;
         if ( rte_eth_macaddr_get(port, &addr) < 0 ) {

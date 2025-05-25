@@ -100,7 +100,7 @@ int parse_ipaddr(const std::string &ipaddr_str, be32_t *ipaddr_dest,
     /* cast to uint64_t is needed, since the shift size could be 32, and
      * shifting by width of a type is UB */
     *ipaddr_dest_mask =
-        (be32_t)((~(uint64_t)0) << (sizeof(be32_t) * CHAR_BIT - mask_val));
+        htonl((be32_t)((~(uint64_t)0) << (sizeof(be32_t) * CHAR_BIT - mask_val)));
 
     return 0;
 }

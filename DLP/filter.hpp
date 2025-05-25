@@ -1,3 +1,6 @@
+#ifndef __FILTER_H
+#define __FILTER_H
+
 #include <cstddef> /* for size_t */
 
 enum filter_dc {
@@ -6,6 +9,8 @@ enum filter_dc {
 	FILTER_PASS,
 };
 
-using filter_fn = filter_dc (*)(char* pkt_tcp_data, size_t size);
+using filter_fn = filter_dc (*)(const char* pkt_tcp_data, size_t size);
 
-filter_dc filter_c_code(char *pkt_tcp_data, size_t size);
+filter_dc filter_entry(const char* pkt_tcp_data, size_t size);
+
+#endif /* __FILTER_H */
