@@ -4,6 +4,8 @@
 #include "endian.hpp"
 #include "fnv_hash.hpp"
 #include "packet.hpp"
+#include <memory>
+#include <optional>
 #include <unordered_map>
 
 /* states aligned with names in Wikipedia table
@@ -25,7 +27,6 @@ enum state_t {
     FIN_ACKED,
 };
 
-#include <iostream>
 struct conn_table_entry {
     be32_t  client_addr = 0;
     be32_t  server_addr = 0;
@@ -43,19 +44,23 @@ struct conn_table_entry {
     seq_t server_seq;
     seq_t client_seq;
 
-	void* user_arg = nullptr;
+    // can keep reference to another conn_table_entry
+    conn_table_entry *ref;
+    void             *user_arg;
 
     /* empty constructor to be able to assign entries[conn_table_entry] =
      * entry_instance*/
     conn_table_entry() {}
 
-	~conn_table_entry() {
-		// dear god...
-		if(user_arg){
-			if(server_addr == 0 && server_port == 0) delete (conn_table_entry*)user_arg;
-			else std::cout << "suspicious user_arg in conn_table_entry" << std::endl;
-		}
-	}
+    // enable copying but settings `ref` to nullptr
+    conn_table_entry(const conn_table_entry &other)
+        : client_addr(other.client_addr), server_addr(other.server_addr),
+          client_port(other.client_port), server_port(other.server_port),
+          client_state(other.client_state), server_state(other.server_state),
+          rule_idx(other.rule_idx), server_fin(other.server_fin),
+          client_fin(other.client_fin), server_seq(other.server_seq),
+          client_seq(other.client_seq), ref(nullptr), user_arg(other.user_arg) {
+    }
 
     conn_table_entry(pkt_props pkt)
         : client_addr(pkt.saddr), server_addr(pkt.daddr),
@@ -123,7 +128,19 @@ class conn_table {
         entries;
 
   public:
-    conn_table() : entries() {}
+    conn_table() : entries() {
+	}
+
+	void test() {
+		conn_table_entry a1(16843018,33685770,43671,2048);
+		conn_table_entry a2(33685770,16843018,2048,43671);
+		conn_table_entry a1_invalid(16843018,33685770,2048,43671);
+		conn_table_entry a2_invalid(33685770,16843018,43671,2048);
+		add_entry(a1);
+		assert(lookup_entry(a1) == lookup_entry(a2));
+		assert(nullptr == lookup_entry(a1_invalid));
+		assert(nullptr == lookup_entry(a2_invalid));
+	}
 
     decision_info tcp_new_conn(pkt_props props, decision_info static_rt_dc);
 

@@ -1,4 +1,3 @@
-/* trick to compile this library even though it doesn't have `extern "C"` */
 extern "C" {
 #include "picohttpparser/picohttpparser.c"
 #include "picohttpparser/picohttpparser.h"
@@ -9,7 +8,6 @@ extern "C" {
 
 http_parsed_req::http_parsed_req() {}
 
-#include <iostream>
 http_parsed_req http_parse_request(const char *req, size_t len) {
     http_parsed_req   result;
     struct phr_header headers[STATIC_NUM_HEADERS];
@@ -19,13 +17,12 @@ http_parsed_req http_parse_request(const char *req, size_t len) {
     const char *path;
     size_t      method_len, path_len;
     int         minor_version;
-    int         req_len =
+	// implicit conversion int -> ssize_t, should be fine always
+    result.metadata_len =
         phr_parse_request(req, len, &method, &method_len, &path, &path_len,
                           &minor_version, headers, &num_headers, 0);
-    if ( req_len < 0 ) {
-        result.metadata_len = -1;
-    } else {
-        result.metadata_len = req_len;
+    if ( result.metadata_len < 0 ) {
+		return result;
     }
 
     result.num_headers = num_headers;

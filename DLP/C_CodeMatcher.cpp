@@ -2,36 +2,55 @@
 #include <iostream>
 #include <limits>
 
-static std::string c_similarities[] = {
-    "#ifdef",       "#ifndef",  "void main(int argc, char* argv[])",
-    "#define",      "typedef",  "char *",
-    "int *",        "char*",    "int*",
-    "int",          "char",     "size_t",
-    "return NULL;", "#include", "stdio.h",
-    "stdlib.h"};
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include "../external/PCRE2.build/pcre2.h"
 
+static std::string c_similarities_raw[] = {
+    "#ifdef",  "#ifndef", "void main(int argc, char* argv[])",
+    "#define", "typedef", "char *",
+    "int *",   "char*",   "int*",
+    "int",     "char",    "size_t",
+};
+
+static std::string c_similarities_regex[] = {
+    R"END(^\s*return\s*\w*\s*$)END",      // return <exp>;
+    R"END(^\s*case\s+\w+:\s*$)END",       // case <case>:
+    R"END(^\s*struct \w+ \w+.*;\s*$)END", // struct <struct name> <variable
+                                          // name>;
+    R"END(^\s*struct \w+\s*\*\s*\w+.*;\s*$)END", // struct <struct name>*
+                                                 // <variable name>;
+    // won't work since these are never within { }
+    R"END(^#include "[\w\/]+\.h"$)END",
+    R"END(^#include <[\w\/]+\.h>$)END",
+};
+
+#define ARR_SIZE(arr) sizeof(arr) / sizeof(arr[0])
 C_CodeMatcher::C_CodeMatcher() {
-    std::string codeblock_pattern;
-    int         pcre2_err;
-    PCRE2_SIZE  pcre2_erroffset;
+    std::string              codeblock_pattern;
+    std::vector<std::string> c_patterns;
+    int                      pcre2_err;
+    PCRE2_SIZE               pcre2_erroffset;
 
-    for ( int i = 0; i < sizeof(c_similarities) / sizeof(c_similarities[0]);
-          i++ ) {
-
+    for ( int i = 0; i < ARR_SIZE(c_similarities_raw); i++ ) {
         // surrounding a pattern with \Q...\E interprets its contents as
         // literals and not regex expressions
-        codeblock_pattern = "\\Q";
-        codeblock_pattern += c_similarities[i];
-        codeblock_pattern += "\\E";
+        c_patterns.push_back("\\Q" + c_similarities_raw[i] + "\\E");
+    }
 
+    for ( int i = 0; i < ARR_SIZE(c_similarities_regex); i++ ) {
+        c_patterns.push_back(c_similarities_regex[i]);
+    }
+
+    for ( auto &regex_exp : c_patterns ) {
         // free'd at desctructor
-        pcre2_code *regex = pcre2_compile(
-            (PCRE2_SPTR)codeblock_pattern.data(), codeblock_pattern.size(),
-            PCRE2_DOTALL, &pcre2_err, &pcre2_erroffset, nullptr);
+        pcre2_code *regex =
+            pcre2_compile((PCRE2_SPTR)regex_exp.data(), regex_exp.size(),
+                          PCRE2_DOTALL | PCRE2_MULTILINE, &pcre2_err,
+                          &pcre2_erroffset, nullptr);
         if ( regex == nullptr ) {
             PCRE2_UCHAR buffer[256];
             pcre2_get_error_message(pcre2_err, buffer, sizeof(buffer));
-            std::cout << "Couldn't compile PCRE2 regex: " << codeblock_pattern
+            std::cout << "Couldn't compile PCRE2 regex: " << regex_exp
                       << std::endl;
             throw std::runtime_error((char *)buffer);
         }
@@ -56,7 +75,7 @@ find_braces(const char open, const char close, const std::string_view text) {
             brace_locations.push_back(
                 std::make_pair(i, std::numeric_limits<size_t>::max()));
             braces_stack.push_back(brace_locations.size() - 1);
-        } else if ( text.at(i) == close ) {
+        } else if ( text.at(i) == close && !braces_stack.empty() ) {
             brace_locations.at(braces_stack.back()).second = i;
             braces_stack.pop_back();
         }
@@ -107,20 +126,10 @@ printf("Matching inside:\n%.*s", (int)text_tomatch.size(),
                 auto match_result = pcre2_match(
                     re, (PCRE2_SPTR)text_tomatch.data(), text_tomatch.size(),
                     ovector[1], 0, match_data, nullptr);
-                /*
-printf("rc = %d\n", match_result);
-for ( int i = 0; i < match_result; i++ ) {
-    printf("%.*s\n", (int)(ovector[i * 2 + 1] - ovector[i * 2]),
-           text_tomatch.data() + ovector[i * 2]);
-}
-                */
 
                 if ( match_result < 0 ) {
                     switch ( match_result ) {
                         case PCRE2_ERROR_NOMATCH:
-							/*
-                            printf("Done, score = %d\n", score);
-							*/
                             break;
                         default:
                             printf("Unknown error when matching: %d\n",
@@ -147,6 +156,15 @@ for ( int i = 0; i < match_result; i++ ) {
 
 #ifdef C_CodeMatcher_UNIT_TEST
 #include <cassert>
+#include <fstream>
+#include <string>
+
+std::string read_file(const std::string &filename) {
+    std::ifstream file(filename, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+}
+
 int main(void) {
     std::string non_c_code_text = R"EOF(
 // Strings are just arrays of chars terminated by a NULL (0x00) byte,
@@ -228,5 +246,17 @@ return buffer;
     ;
     std::cout << "C-code score = " << c_code_score << std::endl;
     ;
+
+    /* find_braces test */
+    auto file_str = read_file("/home/fw/unit_tests.c");
+    auto res = find_braces('{', '}', file_str);
+    /*
+    std::cout << "len = " << file_str.length() << std::endl;
+    std::cout << "find_braces: " << std::endl;
+    for(auto pair : res)
+            std::cout << pair.first << " " << pair.second << std::endl;
+    */
+    c_code_score = matcher.match(file_str);
+    std::cout << "C-code score = " << c_code_score << std::endl;
 }
 #endif

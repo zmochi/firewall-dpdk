@@ -99,7 +99,7 @@ decision_info ruletable::query(const struct pkt_props *pkt, pkt_dc dft_dc) {
     unsigned int  rule_idx;
     decision_info dc_info = {};
 
-    if ( pkt->eth_proto != ETHTYPE_IPV4 ) {
+    if ( pkt->eth_proto != FW_ETHTYPE_IPV4 ) {
         dc_info.decision = PKT_PASS;
         dc_info.reason   = REASON_NONIPV4;
         return dc_info;
